@@ -33,6 +33,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -63,6 +64,36 @@ def _ensure_logs_dir():
     """Lazily create logs directory on first use (avoid side effects at import time)."""
     if TINKER_ATROPOS_ROOT.exists():
         LOGS_DIR.mkdir(exist_ok=True)
+
+
+def _redact_sensitive_text(text: str, secrets: Optional[Dict[str, str]] = None) -> str:
+    """Redact API keys/secrets from subprocess output before logging or printing.
+
+    Some upstream libraries print full values while others print shortened reprs
+    such as ``api_key='sk-or-v1-...abcd'``.  Redact both exact secret values and
+    common key repr/token shapes.  Empty secret values are ignored so we never
+    replace every empty boundary in the text.
+    """
+    if not text:
+        return text
+
+    marker_by_name = {
+        "api_key": "***API_KEY***",
+        "openrouter_api_key": "***API_KEY***",
+        "wandb_api_key": "***WANDB_API_KEY***",
+        "tinker_api_key": "***TINKER_API_KEY***",
+    }
+    redacted = text
+    for name, value in (secrets or {}).items():
+        if value:
+            redacted = redacted.replace(value, marker_by_name.get(name, "***SECRET***"))
+
+    redacted = re.sub(r"api_key=(['\"])[^'\"]*\1", "api_key='***API_KEY***'", redacted, flags=re.DOTALL)
+    redacted = re.sub(r"(?i)\b(?:OPENROUTER_)?API_KEY\s*=\s*[^\s,;]+", "API_KEY=***API_KEY***", redacted)
+    redacted = re.sub(r"(?i)Authorization:\s*Bearer\s+[^\s,;]+", "Authorization: Bearer ***API_KEY***", redacted)
+    redacted = re.sub(r"sk-[A-Za-z0-9_-]+(?:-v\d+)?-\.\.\.[A-Za-z0-9_\-\n]+", "***API_KEY***", redacted)
+    return redacted
+
 
 # ============================================================================
 # Locked Configuration (Infrastructure Settings)
@@ -301,10 +332,14 @@ def _get_env_config_fields(env_file_path: str) -> Dict[str, Dict[str, Any]]:
 
 
 def _initialize_environments():
-    """Initialize environment list on first use."""
+    """Refresh the environment list from disk.
+
+    Environment files are small and AST scanning is cheap.  Rescanning avoids a
+    stale in-process cache when a new environment is added during an active
+    Hermes session.
+    """
     global _environments
-    if not _environments:
-        _environments = _scan_environments()
+    _environments = _scan_environments()
 
 
 # ============================================================================
@@ -1133,7 +1168,8 @@ async def rl_test_inference(
             # IMPORTANT: Use server_type=openai for OpenRouter (not sglang)
             # sglang is only for actual training with Tinker's inference server
             "--openai.base_url", "https://openrouter.ai/api/v1",
-            "--openai.api_key", api_key,
+            # API key is supplied through process_env below, not argv, so it
+            # cannot leak through process listings while the smoke test runs.
             "--openai.model_name", model_id,
             "--openai.server_type", "openai",  # OpenRouter is OpenAI-compatible
             "--openai.health_check", "false",  # OpenRouter doesn't have health endpoint
@@ -1162,11 +1198,27 @@ async def rl_test_inference(
         
         try:
             # Run the process command with real-time output streaming
+            redaction_secrets = {
+                "api_key": api_key,
+                "wandb_api_key": os.getenv("WANDB_API_KEY", ""),
+                "tinker_api_key": os.getenv("TINKER_API_KEY", ""),
+            }
+            process_env = {
+                **os.environ,
+                # OpenAI-compatible APIs such as OpenRouter cannot provide the
+                # token IDs/logprobs required for real training trajectories.
+                # This flag enables Atropos dummy placeholders strictly for the
+                # rl_test_inference smoke path; Tinker training still uses the
+                # sglang server and must not rely on dummy token data.
+                "ATROPOS_ALLOW_DUMMY_MANAGED_SERVER": "1",
+                "ATROPOS_OPENAI_API_KEY": api_key,
+            }
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(TINKER_ATROPOS_ROOT),
+                env=process_env,
             )
             
             # Stream output in real-time while collecting for logs
@@ -1182,9 +1234,10 @@ async def rl_test_inference(
                         break
                     decoded = line.decode().rstrip()
                     lines_list.append(decoded)
-                    # Print progress-related lines in real-time
+                    # Print progress-related lines in real-time after redaction.
                     if any(kw in decoded.lower() for kw in ['processing', 'group', 'step', 'progress', '%', 'completed']):
-                        print(f"  {prefix}{decoded}")
+                        safe_decoded = _redact_sensitive_text(decoded, redaction_secrets)
+                        print(f"  {prefix}{safe_decoded}")
             
             # Read both streams concurrently with timeout
             try:
@@ -1201,9 +1254,10 @@ async def rl_test_inference(
             
             await process.wait()
             
-            # Combine output for logging
-            stdout_text = "\n".join(stdout_lines)
-            stderr_text = "\n".join(stderr_lines)
+            # Combine output for logging after redacting credentials that some
+            # libraries print as part of APIServerConfig reprs.
+            stdout_text = _redact_sensitive_text("\n".join(stdout_lines), redaction_secrets)
+            stderr_text = _redact_sensitive_text("\n".join(stderr_lines), redaction_secrets)
             
             # Write logs to files for inspection outside CLI
             with open(log_file, "w", encoding="utf-8") as f:
@@ -1229,7 +1283,7 @@ async def rl_test_inference(
                 if stderr_lines:
                     print("  Last errors:")
                     for line in stderr_lines[-5:]:
-                        print(f"    {line}")
+                        print(f"    {_redact_sensitive_text(line, redaction_secrets)}")
             else:
                 print("\n  ✅ Process completed successfully")
                 print(f"  Output file: {output_file}")

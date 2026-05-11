@@ -5,6 +5,7 @@ import errno
 import json
 import logging
 import os
+import tempfile
 import threading
 from pathlib import Path
 
@@ -162,6 +163,12 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     except (OSError, ValueError):
         resolved = filepath
     normalized = os.path.normpath(os.path.expanduser(filepath))
+    try:
+        temp_root = os.path.realpath(tempfile.gettempdir())
+        if resolved == temp_root or resolved.startswith(temp_root + os.sep):
+            return None
+    except Exception:
+        pass
     _err = (
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."
