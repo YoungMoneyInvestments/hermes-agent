@@ -1187,9 +1187,10 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
             next_run = base_time.astimezone(timezone.utc) + timedelta(minutes=minutes)
         else:
             # OpenClaw's everyMs + anchorMs schedule is an elapsed-time lattice rooted at an
-            # absolute Unix-millisecond instant. Derive the first lattice point strictly after
-            # base_time using integer microseconds: timestamp()/float loses sub-millisecond phase
-            # near epoch-sized values, and wall-clock cron would shift phase at DST boundaries.
+            # absolute Unix-millisecond instant. Before the anchor, the schedule starts at that
+            # anchor; at or after it, choose the first lattice point strictly after base_time.
+            # Integer microseconds preserve sub-millisecond phase; wall-clock cron would shift it
+            # at DST boundaries.
             epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
             base_utc = base_time.astimezone(timezone.utc)
             base_us = (base_utc - epoch) // timedelta(microseconds=1)
@@ -2113,12 +2114,30 @@ def _rederive_repeat_for_schedule_change(
     updates["repeat"] = repeat
 
 
-def _apply_schedule_update(updated: Dict[str, Any], updates: Dict[str, Any], job_id: str) -> None:
+def _apply_schedule_update(
+    updated: Dict[str, Any], updates: Dict[str, Any], job_id: str,
+    previous_schedule: Optional[Dict[str, Any]] = None,
+    preserve_anchor_for_same_period: bool = False,
+) -> None:
     """Parse a string schedule, refresh ``schedule_display`` and (unless paused) ``next_run_at``."""
     updated_schedule = updated["schedule"]
     if isinstance(updated_schedule, str):
         updated_schedule = parse_schedule(updated_schedule)
         updated["schedule"] = updated_schedule
+    if (
+        preserve_anchor_for_same_period
+        and updated_schedule.get("kind") == "interval"
+        and isinstance(previous_schedule, dict)
+        and previous_schedule.get("kind") == "interval"
+        and previous_schedule.get("minutes") == updated_schedule.get("minutes")
+    ):
+        try:
+            previous_anchor = _interval_anchor_ms(previous_schedule)
+        except ValueError:
+            previous_anchor = None
+        if previous_anchor is not None:
+            # A same-period string edit is a presentation change; keep the existing phase.
+            updated_schedule["anchor_ms"] = previous_anchor
     _interval_anchor_ms(updated_schedule)
     if "schedule_display" in updates:
         updated["schedule_display"] = updates["schedule_display"]
@@ -2131,9 +2150,12 @@ def _apply_schedule_update(updated: Dict[str, Any], updates: Dict[str, Any], job
     if updated.get("state") != "paused":
         updated["next_run_at"] = _next_run_or_reject_past_oneshot(
             updated_schedule, updated.get("name", job_id), updated_schedule, "update ")
-    elif "anchor_ms" in updated_schedule:
+    elif "anchor_ms" in updated_schedule and any(
+        updated_schedule.get(key) != (previous_schedule or {}).get(key)
+        for key in ("kind", "minutes", "anchor_ms")
+    ):
         # A paused schedule edit supersedes the prior schedule's possibly elapsed occurrence.
-        # resume_job recomputes from the new anchored lattice when next_run_at is absent.
+        # An identical anchored lattice must retain its elapsed occurrence for resume_job.
         updated["next_run_at"] = None
 
 
@@ -2163,6 +2185,7 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
         raise ValueError(f"Cron job field(s) cannot be updated: {', '.join(sorted(bad_fields))}")
 
     def apply(jobs, i, job):
+        schedule_input_was_string = isinstance(updates.get("schedule"), str)
         _rederive_repeat_for_schedule_change(job, updates)
         _normalize_job_updates(job, updates)
         _apply_pin_update(job, updates)
@@ -2178,7 +2201,11 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
         if any(k in updates for k in _PAYLOAD_FIELDS) and job_payload_is_empty(updated):
             raise ValueError(EMPTY_PAYLOAD_ERROR)
         if "schedule" in updates:
-            _apply_schedule_update(updated, updates, job_id)
+            _apply_schedule_update(
+                updated, updates, job_id,
+                previous_schedule=job.get("schedule"),
+                preserve_anchor_for_same_period=schedule_input_was_string,
+            )
             # next_run_at now follows the new schedule; a stale quota_hold_until would only shield
             # the record from the stale-error re-arm while no longer describing where it is
             # parked. The next fire re-parks (with a fresh notice) if the window is still closed.

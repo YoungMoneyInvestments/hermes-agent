@@ -346,6 +346,14 @@ class TestComputeNextRun:
         assert result.astimezone(timezone.utc) == expected
         assert result.hour == 7 and result.utcoffset() == timedelta(hours=-5)
 
+        # An absolute schedule starts at its anchor even when the prior run was earlier than it;
+        # this remains true when the prior run predates the anchor by several periods.
+        for prior in (anchor - timedelta(days=3), anchor - timedelta(days=21)):
+            pre_anchor = datetime.fromisoformat(compute_next_run(
+                schedule, last_run_at=prior.isoformat(),
+            ))
+            assert pre_anchor.astimezone(timezone.utc) == anchor
+
         job = create_job(prompt="phase test", schedule="every 1h", deliver="local")
         updated = update_job(job["id"], {"schedule": schedule})
         expected_local = "2026-03-15T07:00:00.321000-05:00"
@@ -353,6 +361,12 @@ class TestComputeNextRun:
         assert updated["schedule_display"] == "every 10080m"
         assert get_job(job["id"])["schedule"]["anchor_ms"] == anchor_ms
         assert updated["next_run_at"] == expected_local
+
+        # The existing schedule-string API can rename/restate the same interval without dropping
+        # its phase metadata.
+        string_updated = update_job(job["id"], {"schedule": "every 10080m"})
+        assert string_updated["schedule"]["anchor_ms"] == anchor_ms
+        assert string_updated["next_run_at"] == expected_local
 
         pause_job(job["id"])
         resumed = resume_job(job["id"])
@@ -398,11 +412,59 @@ class TestComputeNextRun:
         resumed = resume_job(job["id"])
         assert resumed["next_run_at"] == "2026-03-15T12:00:00.321000+00:00"
 
+    def test_paused_identical_anchored_schedule_update_preserves_elapsed_slot(
+        self, tmp_cron_dir, monkeypatch,
+    ):
+        now = datetime(2026, 3, 8, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        anchor = datetime(2026, 3, 1, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        anchor_ms = int((anchor - datetime(1970, 1, 1, tzinfo=timezone.utc)) / timedelta(milliseconds=1))
+        schedule = {"kind": "interval", "minutes": 10080, "anchor_ms": anchor_ms}
+        job = create_job(prompt="same lattice pause", schedule="every 1h", deliver="local")
+        update_job(job["id"], {"schedule": schedule})
+        elapsed_slot = "2026-03-08T12:00:00.321000+00:00"
+        update_job(job["id"], {"next_run_at": elapsed_slot})
+        pause_job(job["id"])
+
+        resupplied = update_job(job["id"], {"schedule": dict(schedule)})
+        assert resupplied["next_run_at"] == elapsed_slot
+        resumed = resume_job(job["id"])
+        assert resumed["next_run_at"] == elapsed_slot
+
+    def test_explicit_anchored_dict_replaces_prior_phase(
+        self, tmp_cron_dir, monkeypatch,
+    ):
+        now = datetime(2026, 3, 8, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        original_anchor = datetime(2026, 3, 1, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        replacement_anchor = original_anchor + timedelta(minutes=1)
+        job = create_job(prompt="replace anchor", schedule="every 1h", deliver="local")
+        update_job(job["id"], {"schedule": {
+            "kind": "interval", "minutes": 10080,
+            "anchor_ms": int((original_anchor - epoch) / timedelta(milliseconds=1)),
+        }})
+
+        changed = update_job(job["id"], {"schedule": {
+            "kind": "interval", "minutes": 10080,
+            "anchor_ms": int((replacement_anchor - epoch) / timedelta(milliseconds=1)),
+        }})
+
+        assert changed["schedule"]["anchor_ms"] == int(
+            (replacement_anchor - epoch) / timedelta(milliseconds=1),
+        )
+        expected = compute_next_run(changed["schedule"])
+        assert changed["next_run_at"] == expected
+
     def test_anchored_long_outage_fast_forward_stays_on_interval_lattice(
         self, tmp_cron_dir, monkeypatch,
     ):
         now = datetime(2026, 3, 23, 13, 17, 0, 123000, tzinfo=timezone.utc)
         monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        monkeypatch.setattr(
+            "cron.jobs._cron_config_number",
+            lambda key, default, cast: cast(True) if key == "catch_up_missed" else cast(default),
+        )
         anchor = datetime(2026, 3, 1, 12, 0, 0, 321000, tzinfo=timezone.utc)
         anchor_ms = int((anchor - datetime(1970, 1, 1, tzinfo=timezone.utc)) / timedelta(milliseconds=1))
         schedule = {"kind": "interval", "minutes": 10080, "anchor_ms": anchor_ms}
