@@ -453,6 +453,68 @@ class TestNoSkillsOptOut:
         assert (profile_dir / "skills").is_dir()
         assert list((profile_dir / "skills").iterdir()) == []
 
+    def test_config_only_profile_skips_skill_sync_subprocess(self, profile_env, monkeypatch):
+        profile_dir = get_profile_dir("config-only")
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "config.yaml").write_text("profile:\n  config_only: true\n", encoding="utf-8")
+
+        def unexpected_subprocess(*args, **kwargs):
+            raise AssertionError("config-only profiles must not spawn skill sync")
+
+        monkeypatch.setattr(profiles.subprocess, "run", unexpected_subprocess)
+        result = profiles.seed_profile_skills(profile_dir, quiet=True)
+
+        assert result["skipped_config_only"] is True
+        assert not (profile_dir / "skills").exists()
+
+    @pytest.mark.parametrize("config", [
+        "profile:\n  config_only: 'true'\n",
+        "profile: []\n",
+        "profile:\n  config_only: [\n",
+        "model: [\n",
+    ])
+    def test_invalid_profile_config_fails_closed_for_skill_sync(self, profile_env, monkeypatch, config):
+        profile_dir = get_profile_dir("bad-config")
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "config.yaml").write_text(config, encoding="utf-8")
+
+        def unexpected_subprocess(*args, **kwargs):
+            raise AssertionError("invalid profile config must not spawn skill sync")
+
+        monkeypatch.setattr(profiles.subprocess, "run", unexpected_subprocess)
+        assert profiles.seed_profile_skills(profile_dir, quiet=True) is None
+
+    def test_profiles_without_opt_in_keep_legacy_skill_sync(self, profile_env, monkeypatch):
+        profile_dir = get_profile_dir("legacy-config")
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "config.yaml").write_text("model: test\n", encoding="utf-8")
+        called = []
+
+        def fake_subprocess(*args, **kwargs):
+            called.append((args, kwargs))
+            return types.SimpleNamespace(returncode=0, stdout='{"copied": []}', stderr="")
+
+        monkeypatch.setattr(profiles.subprocess, "run", fake_subprocess)
+        assert profiles.seed_profile_skills(profile_dir, quiet=True) == {"copied": []}
+        assert len(called) == 1
+
+    def test_config_only_profile_skips_create_time_config_migration(self, profile_env, monkeypatch):
+        profile_dir = get_profile_dir("config-only")
+        profile_dir.mkdir(parents=True)
+        config_path = profile_dir / "config.yaml"
+        config_path.write_text(
+            "_config_version: 1\nprofile:\n  config_only: true\n", encoding="utf-8"
+        )
+        before = config_path.read_bytes()
+
+        def unexpected_migration(*args, **kwargs):
+            raise AssertionError("config-only profiles must not be migrated automatically")
+
+        monkeypatch.setattr("hermes_cli.config.check_config_version", unexpected_migration)
+        monkeypatch.setattr("hermes_cli.config.migrate_config", unexpected_migration)
+        profiles._migrate_profile_config_if_outdated(profile_dir)
+
+        assert config_path.read_bytes() == before
 
 
 
@@ -483,6 +545,73 @@ class TestBackfillProfileEnvs:
         for p in (p1, p2):
             assert (p / ".env").read_text(encoding="utf-8-sig") == "OPENROUTER_API_KEY=root-key\n"
             assert stat.S_IMODE((p / ".env").stat().st_mode) == 0o600
+
+    def test_config_only_and_invalid_profiles_never_copy_or_write_env(self, profile_env, monkeypatch):
+        opted = get_profile_dir("config-only")
+        opted.mkdir(parents=True)
+        (opted / "config.yaml").write_text("profile:\n  config_only: true\n", encoding="utf-8")
+        invalid = get_profile_dir("invalid-config")
+        invalid.mkdir(parents=True)
+        (invalid / "config.yaml").write_text("profile:\n  config_only: 'true'\n", encoding="utf-8")
+
+        original_write_text = Path.write_text
+
+        def reject_env_write(path, *args, **kwargs):
+            if path.name == ".env":
+                raise AssertionError("profile env files must not be created")
+            return original_write_text(path, *args, **kwargs)
+
+        def reject_copy(*args, **kwargs):
+            raise AssertionError("profile env files must not be copied")
+
+        monkeypatch.setattr(Path, "write_text", reject_env_write)
+        monkeypatch.setattr(profiles.shutil, "copy2", reject_copy)
+
+        assert backfill_profile_envs(quiet=True) == []
+        assert not (opted / ".env").exists()
+        assert not (invalid / ".env").exists()
+
+    def test_legacy_profile_keeps_copy_path_with_mocked_io(self, profile_env, monkeypatch):
+        legacy = get_profile_dir("legacy")
+        legacy.mkdir(parents=True)
+        (legacy / "config.yaml").write_text("model:\n  provider: test\n", encoding="utf-8")
+        default_env = _get_default_hermes_home() / ".env"
+        profile_env_path = legacy / ".env"
+        copied = []
+        chmodded = []
+
+        original_exists = Path.exists
+        original_is_file = Path.is_file
+        original_write_text = Path.write_text
+
+        def mocked_exists(path):
+            if path == profile_env_path:
+                return False
+            return original_exists(path)
+
+        def mocked_is_file(path):
+            if path == default_env:
+                return True
+            return original_is_file(path)
+
+        def mocked_copy(source, destination):
+            copied.append((source, destination))
+
+        def reject_env_write(path, *args, **kwargs):
+            if path.name == ".env":
+                raise AssertionError("test must not create an .env file")
+            return original_write_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "exists", mocked_exists)
+        monkeypatch.setattr(Path, "is_file", mocked_is_file)
+        monkeypatch.setattr(Path, "write_text", reject_env_write)
+        monkeypatch.setattr(profiles.shutil, "copy2", mocked_copy)
+        monkeypatch.setattr(profiles.os, "chmod", lambda path, mode: chmodded.append((path, mode)))
+
+        assert backfill_profile_envs(quiet=True) == ["legacy"]
+        assert copied == [(default_env, profile_env_path)]
+        assert chmodded == [(str(profile_env_path), 0o600)]
+        assert not profile_env_path.exists()
 
 
     def test_placeholder_when_default_has_no_env(self, profile_env):

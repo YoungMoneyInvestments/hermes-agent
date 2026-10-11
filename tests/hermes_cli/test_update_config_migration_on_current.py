@@ -73,6 +73,37 @@ def test_migration_policy(monkeypatch, capsys, case, expected):
             assert 'setting reset' in output and 'personality reset' in output
 
 
+def test_config_only_update_skips_active_migration_but_keeps_sibling_pass(tmp_path, monkeypatch, capsys):
+    import hermes_constants
+
+    active = tmp_path / "profiles" / "staging"
+    active.mkdir(parents=True)
+    config_path = active / "config.yaml"
+    config_path.write_text(
+        "_config_version: 1\nprofile:\n  config_only: true\n", encoding="utf-8"
+    )
+    before = config_path.read_bytes()
+    sibling_passes = []
+
+    def unexpected_active_migration(*args, **kwargs):
+        raise AssertionError("config-only active profiles must skip migration checks and writes")
+
+    monkeypatch.setattr(hermes_constants, "get_process_hermes_home", lambda: active)
+    monkeypatch.setattr(config, "get_missing_env_vars", unexpected_active_migration)
+    monkeypatch.setattr(config, "get_missing_config_fields", unexpected_active_migration)
+    monkeypatch.setattr(config, "check_config_version", unexpected_active_migration)
+    monkeypatch.setattr(config, "migrate_config", unexpected_active_migration)
+    monkeypatch.setattr(
+        update_cmd, "_migrate_sibling_profile_configs", lambda: sibling_passes.append(True) or []
+    )
+
+    update_cmd._check_and_apply_config_migration()
+
+    assert sibling_passes == [True]
+    assert config_path.read_bytes() == before
+    assert "Automatic config migration skipped" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize('named', [False, True])
 def test_update_copies_bundled_skill_bytes_to_default_active_and_sibling(tmp_path, monkeypatch, named):
     from pathlib import Path

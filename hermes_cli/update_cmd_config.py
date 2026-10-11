@@ -43,6 +43,7 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
     ``hermes update`` still migrates it.
     """
     from hermes_cli.config import check_config_version, migrate_config
+    from hermes_cli.profiles import _profile_config_only
     migrated: list[tuple[str, int, int]] = []
     with _best_effort('Sibling profile enumeration failed: %s'):
         from hermes_constants import (
@@ -52,6 +53,10 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
         for name, profile_home in _sibling_profile_homes(active_home):
             if not (profile_home / "config.yaml").is_file():
                 continue  # profile never configured — nothing to migrate
+            # A strict config-only opt-in preserves the file byte-for-byte during automatic
+            # update migration. Invalid opt-in/config state also fails closed.
+            if _profile_config_only(profile_home) is not False:
+                continue
             token = set_hermes_home_override(profile_home)
             try:
                 current_ver, latest_ver = check_config_version(raise_on_parse_error=True)
@@ -166,25 +171,33 @@ def _check_and_apply_config_migration(
     """
     from hermes_cli.update_cmd import _migrate_sibling_profile_configs
     from hermes_cli.config import check_config_version, migrate_config
+    from hermes_cli.profiles import _profile_config_only
+    from hermes_constants import get_process_hermes_home
+
     print()
     print("→ Checking configuration for new options...")
-    from hermes_cli.config import get_missing_env_vars, get_missing_config_fields
-    # A config-check failure must not break an otherwise-successful update.
-    try:
-        from hermes_cli.config import get_missing_env_vars, get_missing_config_fields
-        # Log, point at the manual command, and return. See #91360.
-        missing_env = get_missing_env_vars(required_only=True)
-        missing_config = get_missing_config_fields()
-        current_ver, latest_ver = check_config_version(raise_on_parse_error=True)
-    except Exception as exc:
-        logger.debug("Config check during update failed: %s", exc)
-        print("  ⚠️  Could not check config version.")
-        print("     Run 'hermes config migrate' to check manually.")
-        return
+    config_only = _profile_config_only(Path(get_process_hermes_home())) is not False
+    if config_only:
+        print("  ℹ Automatic config migration skipped for config-only or invalid profile config.")
+        missing_env = missing_config = []
+        current_ver = latest_ver = 0
+    else:
+        # A config-check failure must not break an otherwise-successful update.
+        try:
+            from hermes_cli.config import get_missing_env_vars, get_missing_config_fields
+            # Log, point at the manual command, and return. See #91360.
+            missing_env = get_missing_env_vars(required_only=True)
+            missing_config = get_missing_config_fields()
+            current_ver, latest_ver = check_config_version(raise_on_parse_error=True)
+        except Exception as exc:
+            logger.debug("Config check during update failed: %s", exc)
+            print("  ⚠️  Could not check config version.")
+            print("     Run 'hermes config migrate' to check manually.")
+            return
 
     has_new_options = bool(missing_env or missing_config)
-    version_bump_only = not has_new_options and current_ver < latest_ver
-    needs_migration = has_new_options or current_ver < latest_ver
+    version_bump_only = not config_only and not has_new_options and current_ver < latest_ver
+    needs_migration = not config_only and (has_new_options or current_ver < latest_ver)
 
     if version_bump_only:
         # Only the format version changed (defaults merge transparently); prompting
@@ -231,7 +244,7 @@ def _check_and_apply_config_migration(
         else:
             print()
             print("Skipped. Run 'hermes config migrate' later to configure.")
-    else:
+    elif not config_only:
         print("  ✓ Configuration is up to date")
 
     # The migration above touched only the active profile; run the same NON-INTERACTIVE

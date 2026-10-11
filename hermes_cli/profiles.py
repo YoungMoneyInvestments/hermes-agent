@@ -517,6 +517,10 @@ def remove_wrapper_script(name: str) -> bool:
 def _migrate_profile_config_if_outdated(profile_dir: Path) -> None:
     """Migrate a copied config.yaml to the current schema (non-interactive, scoped to the new
     profile); otherwise the first desktop/doctor view shows a scary ``v0 -> latest`` warning."""
+    # Config-only profiles are intentionally staged without automatic maintenance; malformed
+    # opt-in state also fails closed so a best-effort migration cannot rewrite it.
+    if _profile_config_only(profile_dir) is not False:
+        return
     if not (profile_dir / "config.yaml").exists():
         return
     # Creation must not fail over an unmigratable old config; `hermes doctor --fix` surfaces
@@ -1446,10 +1450,57 @@ def _live_default_multiplexer() -> bool:
         return False
 
 
+def _profile_config_only(profile_dir: Path) -> Optional[bool]:
+    """Read the strict ``profile.config_only`` maintenance opt-in.
+
+    ``False`` (including an absent config/setting) preserves legacy profile maintenance;
+    ``True`` opts out of automatic skill and credential-file seeding. ``None`` means the
+    config or opt-in shape is invalid, so maintenance must fail closed rather than infer
+    permission from unreadable or malformed state.
+    """
+    config_path = Path(profile_dir) / "config.yaml"
+    try:
+        content = config_path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeError):
+        return None
+
+    try:
+        import hermes_yaml as yaml
+        config = yaml.safe_load(content)
+    except Exception:
+        return None
+    if config is None:
+        config = {}
+    if not isinstance(config, dict):
+        return None
+
+    profile = config.get("profile")
+    if profile is None and "profile" not in config:
+        return False
+    if not isinstance(profile, dict):
+        return None
+    if "config_only" not in profile:
+        return False
+    enabled = profile["config_only"]
+    return enabled if type(enabled) is bool else None
+
+
 def seed_profile_skills(profile_dir: Path, quiet: bool = False) -> Optional[dict]:
     """Seed bundled skills into a profile via subprocess (sync_skills() caches HERMES_HOME at
     module level). Returns the sync result dict, or None on failure. ``--no-skills`` profiles
-    still run the sync: ``sync_skills()`` detects the marker and seeds only essentials."""
+    still run the sync: ``sync_skills()`` detects the marker and seeds only essentials.
+    Profiles with ``profile.config_only: true`` skip the subprocess entirely; malformed config
+    also fails closed and is reported as a failed sync."""
+    config_only = _profile_config_only(profile_dir)
+    if config_only is True:
+        return {"copied": [], "updated": [], "user_modified": [], "skipped_config_only": True}
+    if config_only is None:
+        if not quiet:
+            print(f"⚠ Skill seeding skipped for {profile_dir}: invalid profile config")
+        return None
+
     project_root = Path(__file__).parent.parent.resolve()
     try:
         result = subprocess.run(
@@ -1491,6 +1542,13 @@ def backfill_profile_envs(quiet: bool = False) -> List[str]:
     backfilled: List[str] = []
     default_env = _get_default_hermes_home() / ".env"
     for entry in _iter_named_profile_dirs():
+        config_only = _profile_config_only(entry)
+        if config_only is True:
+            continue
+        if config_only is None:
+            if not quiet:
+                print(f"⚠ .env backfill skipped for profile '{entry.name}': invalid profile config")
+            continue
         env_path = entry / ".env"
         if env_path.exists():
             continue

@@ -117,6 +117,35 @@ def test_one_broken_profile_does_not_block_others(monkeypatch, tmp_path):
     assert [m[0] for m in migrated] == ["healthy"]
 
 
+def test_config_only_siblings_are_not_rewritten_and_healthy_siblings_migrate(monkeypatch, tmp_path):
+    active = _write_profile(tmp_path / "profiles", "active", _latest_version())
+    opted = _write_profile(tmp_path / "profiles", "staging", 12)
+    opted_config = opted / "config.yaml"
+    opted_config.write_text(
+        "_config_version: 12\nmodel:\n  provider: nous\nprofile:\n  config_only: true\n",
+        encoding="utf-8",
+    )
+    opted_before = opted_config.read_bytes()
+
+    malformed = _write_profile(tmp_path / "profiles", "invalid-optin", 12)
+    malformed_config = malformed / "config.yaml"
+    malformed_config.write_text(
+        "_config_version: 12\nmodel:\n  provider: nous\nprofile:\n  config_only: 'true'\n",
+        encoding="utf-8",
+    )
+    malformed_before = malformed_config.read_bytes()
+
+    healthy = _write_profile(tmp_path / "profiles", "healthy", 12)
+    _setup(monkeypatch, tmp_path, active)
+
+    migrated = update_cmd._migrate_sibling_profile_configs()
+
+    assert [name for name, _before, _after in migrated] == ["healthy"]
+    assert opted_config.read_bytes() == opted_before
+    assert malformed_config.read_bytes() == malformed_before
+    assert yaml.safe_load((healthy / "config.yaml").read_text())["_config_version"] == _latest_version()
+
+
 def test_override_is_reset_after_run(monkeypatch, tmp_path):
     """The ContextVar override must not leak past the sweep."""
     from hermes_constants import get_hermes_home_override
