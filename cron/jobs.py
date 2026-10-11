@@ -2115,7 +2115,8 @@ def _rederive_repeat_for_schedule_change(
     if isinstance(new_schedule, str):
         new_schedule = parse_schedule(new_schedule)
         updates["schedule"] = new_schedule
-    old_kind = (job.get("schedule") or {}).get("kind")
+    old_schedule = job.get("schedule")
+    old_kind = old_schedule.get("kind") if isinstance(old_schedule, dict) else None
     new_kind = new_schedule.get("kind")
     if old_kind == new_kind:
         return
@@ -2143,13 +2144,13 @@ def _apply_schedule_update(
     interval; a present null anchor remains invalid.
     """
     updated_schedule = updated["schedule"]
+    previous_schedule = previous_schedule if isinstance(previous_schedule, dict) else {}
     if isinstance(updated_schedule, str):
         updated_schedule = parse_schedule(updated_schedule)
         updated["schedule"] = updated_schedule
     if (
         preserve_anchor_for_interval_string
         and updated_schedule.get("kind") == "interval"
-        and isinstance(previous_schedule, dict)
         and previous_schedule.get("kind") == "interval"
     ):
         try:
@@ -2183,9 +2184,9 @@ def _apply_schedule_update(
         updated["next_run_at"] = _next_run_or_reject_past_oneshot(
             updated_schedule, updated.get("name", job_id), updated_schedule, "update ")
     elif (
-        ("anchor_ms" in updated_schedule or "anchor_ms" in (previous_schedule or {}))
+        ("anchor_ms" in updated_schedule or "anchor_ms" in previous_schedule)
         and any(
-            updated_schedule.get(key) != (previous_schedule or {}).get(key)
+            updated_schedule.get(key) != previous_schedule.get(key)
             for key in ("kind", "minutes", "anchor_ms")
         )
     ):

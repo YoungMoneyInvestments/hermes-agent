@@ -562,7 +562,8 @@ class TestComputeNextRun:
 
         # The stored occurrence is more than a weekly grace window stale. Catch-up still fires
         # once, while the provisional next slot remains on the absolute weekly lattice.
-        overdue = datetime(2026, 3, 8, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        overdue = datetime(2026, 3, 8, 12, 0, 1, 321000, tzinfo=timezone.utc)
+        assert (overdue - anchor) % timedelta(minutes=10080) != timedelta(0)
         update_job(job["id"], {"next_run_at": overdue.isoformat()})
         due = get_due_jobs()
 
@@ -571,6 +572,27 @@ class TestComputeNextRun:
         expected_next = datetime(2026, 3, 29, 12, 0, 0, 321000, tzinfo=timezone.utc)
         assert actual_next == expected_next
         assert (actual_next - anchor) % timedelta(minutes=10080) == timedelta(0)
+
+    def test_anchored_missing_next_run_recovers_to_lattice(self, tmp_cron_dir, monkeypatch):
+        now = datetime(2026, 3, 23, 13, 17, 0, 123000, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        anchor = datetime(2026, 3, 1, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        anchor_ms = int((anchor - datetime(1970, 1, 1, tzinfo=timezone.utc)) / timedelta(milliseconds=1))
+        schedule = {"kind": "interval", "minutes": 10080, "anchor_ms": anchor_ms}
+        job = create_job(prompt="missing next phase test", schedule="every 1h", deliver="local")
+        update_job(job["id"], {"schedule": schedule})
+        rows = load_jobs()
+        row = next(entry for entry in rows if entry["id"] == job["id"])
+        row["next_run_at"] = None
+        save_jobs(rows)
+
+        due = get_due_jobs()
+
+        assert job["id"] not in {entry["id"] for entry in due}
+        recovered = datetime.fromisoformat(get_job(job["id"])["next_run_at"])
+        expected = datetime(2026, 3, 29, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        assert recovered == expected
+        assert (recovered - anchor) % timedelta(minutes=10080) == timedelta(0)
 
     @pytest.mark.parametrize("bad_schedule", [
         {"kind": "interval", "minutes": 10, "anchor_ms": None},
@@ -709,6 +731,26 @@ class TestComputeNextRun:
         assert repaired_paused["enabled"] is False
         assert repaired_paused["last_error"] is None
         assert repaired_paused["next_run_at"] is None
+
+    @pytest.mark.parametrize("legacy_schedule", ["every 1h", ["legacy schedule"]])
+    def test_paused_schedule_replacement_handles_nonmapping_previous_schedule(
+        self, tmp_cron_dir, legacy_schedule,
+    ):
+        job = create_job(prompt="repair legacy schedule shape", schedule="every 5m", deliver="local")
+        pause_job(job["id"])
+        rows = load_jobs()
+        row = next(entry for entry in rows if entry["id"] == job["id"])
+        row["schedule"] = legacy_schedule
+        save_jobs(rows)
+
+        repaired = update_job(job["id"], {
+            "schedule": {"kind": "interval", "minutes": 10, "anchor_ms": 0},
+        })
+
+        assert repaired["schedule"] == {"kind": "interval", "minutes": 10, "anchor_ms": 0}
+        assert repaired["enabled"] is False
+        assert repaired["state"] == "paused"
+        assert repaired["next_run_at"] is None
 
     def test_nonforced_claim_does_not_mutate_paused_malformed_schedule(self, tmp_cron_dir):
         job = create_job(prompt="paused malformed", schedule="every 5m", deliver="local")

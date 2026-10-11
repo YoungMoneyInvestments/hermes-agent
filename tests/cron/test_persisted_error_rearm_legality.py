@@ -106,7 +106,7 @@ class TestCronRearmRespectsScheduleLegality:
         )
 
     def test_anchored_interval_rearms_to_next_phase_slot(self, cron_store):
-        """A stale anchored interval must recover without inventing an off-phase instant."""
+        """Stale anchored recovery takes the strict successor; it does not replay scan-time slots."""
         job = J.create_job(prompt="weekly probe", schedule="every 1h", no_agent=True, script="p.py")
         now = datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc)
         anchor = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
@@ -121,7 +121,7 @@ class TestCronRearmRespectsScheduleLegality:
         )
         with mock.patch.object(J, "_hermes_now", lambda: now):
             due = J.get_due_jobs()
-        assert due == [], "the next phase slot is future-dated and must not dispatch early"
+        assert due == [], "strict-successor stale recovery must not replay the occurrence at scan time"
         recovered = datetime.fromisoformat(J.get_job(job["id"])["next_run_at"])
         assert recovered == datetime(2026, 3, 15, 12, 0, tzinfo=timezone.utc)
         assert J.get_persisted_error_recovery_stats()["persisted_error_recoveries"] == 1
