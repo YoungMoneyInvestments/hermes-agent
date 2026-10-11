@@ -667,6 +667,8 @@ class TestComputeNextRun:
     def test_malformed_schedule_shape_fails_closed_through_due_scan_and_claim(
         self, tmp_cron_dir, monkeypatch, caplog, bad_schedule,
     ):
+        from cron.jobs import _MALFORMED_ANCHORED_SCHEDULE_ERROR
+
         now = datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc)
         monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
         malformed = create_job(prompt="malformed shape", schedule="every 5m", deliver="local")
@@ -684,11 +686,51 @@ class TestComputeNextRun:
         assert malformed["id"] not in {job["id"] for job in due}
         assert healthy["id"] in {job["id"] for job in due}
         failed = get_job(malformed["id"])
-        assert failed["schedule"] == bad_schedule
+        assert failed["schedule"] == (bad_schedule if isinstance(bad_schedule, dict) else {})
         assert failed["state"] == "error"
-        assert failed["last_error"]
+        assert failed["last_error"] == _MALFORMED_ANCHORED_SCHEDULE_ERROR
         assert failed["next_run_at"] is None
         assert claim_job_for_fire(malformed["id"]) is False
+
+    def test_unrelated_update_of_malformed_schedule_fails_with_repair_diagnostic(
+        self, tmp_cron_dir,
+    ):
+        from cron.jobs import _MALFORMED_ANCHORED_SCHEDULE_ERROR
+
+        job = create_job(prompt="malformed unrelated edit", schedule="every 5m", deliver="local")
+        rows = load_jobs()
+        rows[0].update(
+            schedule="legacy schedule",
+            state="error",
+            last_error=_MALFORMED_ANCHORED_SCHEDULE_ERROR,
+            next_run_at=None,
+        )
+        save_jobs(rows)
+
+        with pytest.raises(ValueError, match="Invalid schedule or anchor.*remove anchor_ms"):
+            update_job(job["id"], {"name": "Better name"})
+
+        assert get_job(job["id"])["name"] == "malformed unrelated edit"
+
+    def test_advance_next_runs_skips_malformed_schedule_and_advances_sibling(
+        self, tmp_cron_dir, monkeypatch,
+    ):
+        now = datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        malformed = create_job(prompt="malformed advance", schedule="every 5m", deliver="local")
+        healthy = create_job(prompt="healthy advance", schedule="every 5m", deliver="local")
+        rows = load_jobs()
+        for row in rows:
+            row["next_run_at"] = (now - timedelta(minutes=1)).isoformat()
+            if row["id"] == malformed["id"]:
+                row["schedule"] = "legacy schedule"
+        save_jobs(rows)
+
+        from cron.jobs import advance_next_runs
+
+        assert advance_next_runs([malformed["id"], healthy["id"]]) == 1
+        assert get_job(malformed["id"])["next_run_at"] == (now - timedelta(minutes=1)).isoformat()
+        assert datetime.fromisoformat(get_job(healthy["id"])["next_run_at"]) == now + timedelta(minutes=5)
 
     @pytest.mark.parametrize("bad_schedule", ["legacy schedule", {}, {"kind": "future-schedule"}])
     def test_malformed_schedule_diagnostic_can_be_repaired_and_resumed(

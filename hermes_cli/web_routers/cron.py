@@ -623,7 +623,11 @@ def _pause_cron_job_sync(job_id: str, profile: Optional[str] = None):
 
 
 def _resume_cron_job_sync(job_id: str, profile: Optional[str] = None):
-    return _found(_mutate_cron_for_profile(_job_profile(job_id, profile), "resume_job", job_id))
+    try:
+        job = _mutate_cron_for_profile(_job_profile(job_id, profile), "resume_job", job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _found(job)
 
 
 def _trigger_cron_job_sync(job_id: str, profile: Optional[str] = None):

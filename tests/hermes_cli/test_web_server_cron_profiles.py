@@ -643,6 +643,32 @@ def test_trigger_cron_job_surfaces_malformed_schedule_diagnostic(
     )["last_error"] == cron_jobs._MALFORMED_ANCHORED_SCHEDULE_ERROR
 
 
+def test_resume_cron_job_returns_malformed_schedule_as_conflict(isolated_profiles):
+    from cron import jobs as cron_jobs
+
+    job = _web_server_cron._call_cron_for_profile(
+        "worker_alpha",
+        "create_job",
+        prompt="malformed resume",
+        schedule="every 1h",
+        name="malformed-resume-job",
+    )
+    _web_server_cron._call_cron_for_profile("worker_alpha", "pause_job", job["id"])
+    rows = _web_server_cron._call_cron_for_profile("worker_alpha", "load_jobs")
+    next(row for row in rows if row["id"] == job["id"]).update(
+        schedule={},
+        state="error",
+        last_error=cron_jobs._MALFORMED_ANCHORED_SCHEDULE_ERROR,
+    )
+    _web_server_cron._call_cron_for_profile("worker_alpha", "save_jobs", rows)
+
+    with pytest.raises(HTTPException) as exc:
+        _rt_cron._resume_cron_job_sync(job["id"], profile="worker_alpha")
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Cannot resume: " + cron_jobs._MALFORMED_ANCHORED_SCHEDULE_ERROR
+
+
 @pytest.mark.asyncio
 async def test_trigger_cron_job_forces_paused_job_atomically(
     isolated_profiles,

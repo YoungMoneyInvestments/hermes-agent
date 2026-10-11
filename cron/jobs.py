@@ -2216,9 +2216,14 @@ def _fill_missing_next_run(updated: Dict[str, Any]) -> None:
         or updated.get("next_run_at")
     ):
         return
-    next_run = compute_next_run(updated["schedule"])
-    if next_run is None and updated["schedule"].get("kind") == "once":
-        run_at = updated["schedule"].get("run_at", "unknown")
+    schedule = updated.get("schedule")
+    try:
+        _interval_anchor_ms(schedule)
+    except ValueError as exc:
+        raise ValueError(_MALFORMED_ANCHORED_SCHEDULE_ERROR) from exc
+    next_run = compute_next_run(schedule)
+    if next_run is None and schedule.get("kind") == "once":
+        run_at = schedule.get("run_at", "unknown")
         raise ValueError(
             f"Requested one-shot time {run_at} is in the past "
             f"(grace window: {ONESHOT_GRACE_SECONDS}s) and cannot be scheduled.")
@@ -2844,13 +2849,15 @@ def advance_next_runs(job_ids) -> int:
         now = _hermes_now().isoformat()
         advanced = 0
         for job in jobs:
+            schedule = job.get("schedule")
             if (
                 job["id"] not in ids
                 or (is_terminal_job(job) and not _is_recoverable_error_job(job))
-                or job.get("schedule", {}).get("kind") not in {"cron", "interval"}
+                or not isinstance(schedule, dict)
+                or schedule.get("kind") not in {"cron", "interval"}
             ):
                 continue
-            new_next = compute_next_run(job["schedule"], now)
+            new_next = compute_next_run(schedule, now)
             if new_next and new_next != job.get("next_run_at"):
                 job["next_run_at"] = new_next
                 advanced += 1
@@ -3080,13 +3087,15 @@ class _DueScan:
 
 
 def _normalize_due_scan_records(raw_jobs: List[Dict[str, Any]]) -> bool:
-    """Repair record metadata before scanning while leaving malformed schedules visible to the
-    per-job fail-closed validator. Replacing a bad schedule with ``{}`` would erase its invalid
-    shape and risk dispatching it through fallback paths."""
+    """Repair legacy record shapes before scanning; unknown/empty schedule mappings still reach
+    the per-job validator and fail closed with the persisted repair diagnostic."""
     changed = False
     for rj in raw_jobs:
         if not rj.get("id"):
             rj["id"] = rj.pop("job_id", None) or uuid.uuid4().hex[:12]
+            changed = True
+        if not isinstance(rj.get("schedule"), dict):
+            rj["schedule"] = {}
             changed = True
         for key in ("next_run_at", "last_run_at"):
             value = rj.get(key)
