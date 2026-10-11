@@ -37,8 +37,8 @@ def merge_job_definition(local: Dict[str, Any], authored: Dict[str, Any]) -> Dic
     # omitted incoming schedule means retain the local schedule, not erase or revalidate it.
     if "schedule" not in authored and "schedule" in local:
         merged["schedule"] = local["schedule"]
-    if "schedule_display" not in authored and "schedule_display" in local:
-        merged["schedule_display"] = local["schedule_display"]
+        if "schedule_display" not in authored and "schedule_display" in local:
+            merged["schedule_display"] = local["schedule_display"]
     merged["repeat"] = {
         "completed": (local.get("repeat") or {}).get("completed", 0),
         "times": (authored.get("repeat") or {}).get("times"),

@@ -919,6 +919,25 @@ class TestComputeNextRun:
         assert merged["next_run_at"] == local["next_run_at"]
         assert merged["pending_slot"] == local["pending_slot"]
 
+    def test_authored_schedule_change_does_not_retain_stale_display(self):
+        from cron.job_definition import merge_job_definition
+
+        local = {
+            "id": "changed-schedule-display",
+            "name": "Changed schedule",
+            "prompt": "Check",
+            "schedule": {"kind": "interval", "minutes": 60},
+            "schedule_display": "old label",
+            "next_run_at": "2026-03-08T13:00:00+00:00",
+            "enabled": True,
+            "state": "scheduled",
+        }
+
+        merged = merge_job_definition(local, {"schedule": "every 2h"})
+
+        assert merged["schedule"]["minutes"] == 120
+        assert merged["schedule_display"] != "old label"
+
     def test_paused_authored_interval_string_reimport_preserves_anchor(self, monkeypatch):
         from cron.job_definition import merge_job_definition
 
