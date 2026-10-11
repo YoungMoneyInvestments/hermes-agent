@@ -456,6 +456,56 @@ class TestComputeNextRun:
         expected = compute_next_run(changed["schedule"])
         assert changed["next_run_at"] == expected
 
+    def test_interval_string_period_change_preserves_existing_anchor(
+        self, tmp_cron_dir, monkeypatch,
+    ):
+        now = datetime(2026, 3, 8, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        anchor = datetime(2026, 3, 1, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        anchor_ms = int((anchor - datetime(1970, 1, 1, tzinfo=timezone.utc)) / timedelta(milliseconds=1))
+        job = create_job(prompt="change anchored cadence", schedule="every 1h", deliver="local")
+        update_job(job["id"], {"schedule": {
+            "kind": "interval", "minutes": 10080, "anchor_ms": anchor_ms,
+        }})
+
+        changed = update_job(job["id"], {"schedule": "every 20160m"})
+
+        assert changed["schedule"]["minutes"] == 20160
+        assert changed["schedule"]["anchor_ms"] == anchor_ms
+        assert changed["next_run_at"] == "2026-03-15T12:00:00.321000+00:00"
+
+    def test_paused_interval_schedule_anchor_removal_clears_elapsed_slot(
+        self, tmp_cron_dir, monkeypatch,
+    ):
+        now = datetime(2026, 3, 8, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        anchor = datetime(2026, 3, 1, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        anchor_ms = int((anchor - datetime(1970, 1, 1, tzinfo=timezone.utc)) / timedelta(milliseconds=1))
+        job = create_job(prompt="remove interval anchor", schedule="every 1h", deliver="local")
+        update_job(job["id"], {"schedule": {
+            "kind": "interval", "minutes": 10080, "anchor_ms": anchor_ms,
+        }})
+        elapsed_slot = "2026-03-08T12:00:00.321000+00:00"
+        update_job(job["id"], {"next_run_at": elapsed_slot})
+        pause_job(job["id"])
+
+        changed = update_job(job["id"], {"schedule": {"kind": "interval", "minutes": 10080}})
+
+        assert changed["next_run_at"] is None
+        resumed = resume_job(job["id"])
+        assert resumed["next_run_at"] == "2026-03-15T12:00:00.321000+00:00"
+
+    def test_anchored_next_run_overflow_fails_closed(self, monkeypatch):
+        monkeypatch.setattr(
+            "cron.jobs._hermes_now",
+            lambda: datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc),
+        )
+
+        assert compute_next_run(
+            {"kind": "interval", "minutes": 1, "anchor_ms": 0},
+            last_run_at="9999-12-31T23:59:59.999999+00:00",
+        ) is None
+
     def test_anchored_long_outage_fast_forward_stays_on_interval_lattice(
         self, tmp_cron_dir, monkeypatch,
     ):

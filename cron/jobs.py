@@ -1199,8 +1199,9 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
             steps = max(0, (base_us - anchor_us) // period_us + 1)
             try:
                 next_run = epoch + timedelta(microseconds=anchor_us + steps * period_us)
-            except OverflowError as exc:
-                raise ValueError("interval anchor_ms produces a datetime outside the supported range") from exc
+            except (OverflowError, ValueError) as exc:
+                logger.warning("Cannot compute next run for anchored interval: %s", exc)
+                return None
         return next_run.astimezone(base_time.tzinfo).isoformat()
     if kind == "cron":
         expr = schedule.get("expr")
@@ -2117,7 +2118,7 @@ def _rederive_repeat_for_schedule_change(
 def _apply_schedule_update(
     updated: Dict[str, Any], updates: Dict[str, Any], job_id: str,
     previous_schedule: Optional[Dict[str, Any]] = None,
-    preserve_anchor_for_same_period: bool = False,
+    preserve_anchor_for_interval_string: bool = False,
 ) -> None:
     """Parse a string schedule, refresh ``schedule_display`` and (unless paused) ``next_run_at``."""
     updated_schedule = updated["schedule"]
@@ -2125,18 +2126,17 @@ def _apply_schedule_update(
         updated_schedule = parse_schedule(updated_schedule)
         updated["schedule"] = updated_schedule
     if (
-        preserve_anchor_for_same_period
+        preserve_anchor_for_interval_string
         and updated_schedule.get("kind") == "interval"
         and isinstance(previous_schedule, dict)
         and previous_schedule.get("kind") == "interval"
-        and previous_schedule.get("minutes") == updated_schedule.get("minutes")
     ):
         try:
             previous_anchor = _interval_anchor_ms(previous_schedule)
         except ValueError:
             previous_anchor = None
         if previous_anchor is not None:
-            # A same-period string edit is a presentation change; keep the existing phase.
+            # A string edit changes interval cadence text, not the absolute phase origin.
             updated_schedule["anchor_ms"] = previous_anchor
     _interval_anchor_ms(updated_schedule)
     if "schedule_display" in updates:
@@ -2150,12 +2150,14 @@ def _apply_schedule_update(
     if updated.get("state") != "paused":
         updated["next_run_at"] = _next_run_or_reject_past_oneshot(
             updated_schedule, updated.get("name", job_id), updated_schedule, "update ")
-    elif "anchor_ms" in updated_schedule and any(
-        updated_schedule.get(key) != (previous_schedule or {}).get(key)
-        for key in ("kind", "minutes", "anchor_ms")
+    elif (
+        ("anchor_ms" in updated_schedule or "anchor_ms" in (previous_schedule or {}))
+        and any(
+            updated_schedule.get(key) != (previous_schedule or {}).get(key)
+            for key in ("kind", "minutes", "anchor_ms")
+        )
     ):
-        # A paused schedule edit supersedes the prior schedule's possibly elapsed occurrence.
-        # An identical anchored lattice must retain its elapsed occurrence for resume_job.
+        # Changed anchored timing supersedes the old occurrence; identical timing keeps it for resume.
         updated["next_run_at"] = None
 
 
@@ -2204,7 +2206,7 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             _apply_schedule_update(
                 updated, updates, job_id,
                 previous_schedule=job.get("schedule"),
-                preserve_anchor_for_same_period=schedule_input_was_string,
+                preserve_anchor_for_interval_string=schedule_input_was_string,
             )
             # next_run_at now follows the new schedule; a stale quota_hold_until would only shield
             # the record from the stale-error re-arm while no longer describing where it is
@@ -3117,9 +3119,10 @@ def _rearm_stale_error_recurring(d: _DueJob) -> datetime:
     next_run_dt.
 
     Such a job errored, mark_job_run parked next_run_at in the future, and nothing re-dispatched it
-    (the in-memory stale-claim sweep cannot see it). Interval jobs re-arm to now (always a legal
-    fire); cron jobs re-arm to the next LEGAL occurrence, since re-arming to now would fire at times
-    the expression excludes. A correctly-parked cron value is left as-is.
+    (the in-memory stale-claim sweep cannot see it). Unanchored interval jobs re-arm to now; an
+    anchored interval recomputes its next absolute lattice slot so recovery cannot invent a new
+    phase. Cron jobs likewise re-arm to the next LEGAL occurrence, since re-arming to now would
+    fire at times the expression excludes. A correctly-parked cron value is left as-is.
     """
     now = d.scan.now
     if not (
@@ -3130,6 +3133,7 @@ def _rearm_stale_error_recurring(d: _DueJob) -> datetime:
         return d.next_run_dt
     if d.kind == "interval":
         if "anchor_ms" in d.schedule:
+            # Keep the imported absolute phase; `now` may not be an occurrence on its lattice.
             recovered_next = d.recompute_next()
             recovered_next_dt = _parse_aware(recovered_next) if recovered_next else None
         else:
