@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import hermes_cli.backup as backup
+import hermes_cli.update_cmd_maint as update_maint
 
 
 def _mk_profile(home: Path, jobs: int = 0) -> Path:
@@ -58,6 +59,42 @@ class TestSiblingEnumeration:
 
 
 class TestAllProfileSnapshots:
+    def test_config_only_active_home_skips_automatic_backup(self, tmp_path, monkeypatch, capsys):
+        (tmp_path / "config.yaml").write_text(
+            "profile:\n  config_only: true\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        calls = []
+        monkeypatch.setattr(update_maint, "_resolve_pre_update_backup_mode", lambda args: calls.append("mode"))
+        monkeypatch.setattr(update_maint, "_run_quick_snapshots", lambda: calls.append("snapshot"))
+        monkeypatch.setattr(update_maint, "_run_full_backup", lambda: calls.append("full"))
+
+        assert update_maint._run_pre_update_backup(object()) is None
+        assert calls == []
+        assert "skipped (config-only)" in capsys.readouterr().out
+        assert not (tmp_path / "state-snapshots").exists()
+        assert not (tmp_path / "backups").exists()
+
+    def test_config_only_sibling_is_skipped_without_blocking_healthy_sibling(
+        self, profiles, monkeypatch
+    ):
+        (profiles["sparks"] / "config.yaml").write_text(
+            "profile:\n  config_only: true\n", encoding="utf-8"
+        )
+        calls = []
+
+        def fake_snapshot(*, label, hermes_home, keep=None, max_file_size=None):
+            calls.append((label, hermes_home))
+            return "snapshot-id"
+
+        monkeypatch.setattr(backup, "create_quick_snapshot", fake_snapshot)
+        result = backup.create_pre_update_snapshots_all_profiles(
+            invoking_home=profiles["default"]
+        )
+
+        assert result == {"work": "snapshot-id"}
+        assert calls == [("pre-update", profiles["work"])]
+
     def test_each_sibling_snapshotted_into_own_home(self, profiles):
         result = backup.create_pre_update_snapshots_all_profiles(
             invoking_home=profiles["default"], keep=1

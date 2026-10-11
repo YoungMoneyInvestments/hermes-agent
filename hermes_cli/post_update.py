@@ -65,6 +65,14 @@ def step_migrate_config() -> dict:
     migrate, verify the version advanced, restore the backups on failure.
     No-op when the on-disk version is current (the 99% case).
     """
+    from hermes_constants import get_hermes_home
+    from hermes_cli.profiles import _profile_config_only
+
+    config_only = _profile_config_only(get_hermes_home())
+    if config_only is not False:
+        reason = "config-only" if config_only is True else "invalid-profile-config"
+        return {"ok": True, "skipped": reason}
+
     from hermes_cli.config import (
         check_config_version,
         get_config_path,
@@ -109,6 +117,14 @@ def step_migrate_config() -> dict:
 def step_sync_skills() -> dict:
     """Sync bundled skills into the active home. Content-diffed, respects
     user modifications and deletions; converges on repeat runs."""
+    from hermes_constants import get_hermes_home
+    from hermes_cli.profiles import _profile_config_only
+
+    config_only = _profile_config_only(get_hermes_home())
+    if config_only is not False:
+        reason = "config-only" if config_only is True else "invalid-profile-config"
+        return {"ok": True, "skipped": reason}
+
     from tools.skills_sync import sync_skills
 
     result = sync_skills(quiet=True) or {}

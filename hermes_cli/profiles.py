@@ -1454,9 +1454,9 @@ def _profile_config_only(profile_dir: Path) -> Optional[bool]:
     """Read the strict ``profile.config_only`` maintenance opt-in.
 
     ``False`` (including an absent config/setting) preserves legacy profile maintenance;
-    ``True`` opts out of automatic skill and credential-file seeding. ``None`` means the
-    config or opt-in shape is invalid, so maintenance must fail closed rather than infer
-    permission from unreadable or malformed state.
+    ``True`` opts out of automatic profile migration, skill sync, and credential-file seeding.
+    ``None`` means the config or opt-in shape is invalid, so maintenance must fail closed rather
+    than infer permission from unreadable or malformed state.
     """
     config_path = Path(profile_dir) / "config.yaml"
     try:
@@ -1477,7 +1477,7 @@ def _profile_config_only(profile_dir: Path) -> Optional[bool]:
         return None
 
     profile = config.get("profile")
-    if profile is None and "profile" not in config:
+    if profile is None:
         return False
     if not isinstance(profile, dict):
         return None
@@ -1492,14 +1492,14 @@ def seed_profile_skills(profile_dir: Path, quiet: bool = False) -> Optional[dict
     module level). Returns the sync result dict, or None on failure. ``--no-skills`` profiles
     still run the sync: ``sync_skills()`` detects the marker and seeds only essentials.
     Profiles with ``profile.config_only: true`` skip the subprocess entirely; malformed config
-    also fails closed and is reported as a failed sync."""
+    also fails closed and is reported as skipped."""
     config_only = _profile_config_only(profile_dir)
     if config_only is True:
         return {"copied": [], "updated": [], "user_modified": [], "skipped_config_only": True}
     if config_only is None:
         if not quiet:
             print(f"⚠ Skill seeding skipped for {profile_dir}: invalid profile config")
-        return None
+        return {"copied": [], "updated": [], "user_modified": [], "skipped_invalid_config": True}
 
     project_root = Path(__file__).parent.parent.resolve()
     try:

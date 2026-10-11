@@ -17,6 +17,7 @@ from tools.skills_sync import (
     _dir_hash,
     sync_skills,
 )
+from tools import skills_sync
 from tools.skills_sync_bundled_ops import reset_bundled_skill
 
 
@@ -133,6 +134,36 @@ class TestReadSkillName:
         )
         skills = _discover_bundled_skills(tmp_path)
         assert skills[0][0] == "audiocraft-audio-generation"
+
+
+@pytest.mark.parametrize(
+    "profile_config,skip_key",
+    [
+        ("profile:\n  config_only: true\n", "skipped_config_only"),
+        ("profile:\n  config_only: 'true'\n", "skipped_invalid_config"),
+    ],
+)
+def test_config_only_or_invalid_profile_skips_before_skills_tree_write(
+    tmp_path, monkeypatch, profile_config, skip_key,
+):
+    home = tmp_path / "profile"
+    home.mkdir()
+    (home / "config.yaml").write_text(profile_config, encoding="utf-8")
+    bundled = tmp_path / "bundled"
+    skill = bundled / "example"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: example\n---\n", encoding="utf-8")
+
+    monkeypatch.setattr(skills_sync, "_hermes_home", lambda: home)
+    monkeypatch.setattr(skills_sync, "_skills_dir", lambda: home / "skills")
+    monkeypatch.setattr(skills_sync, "_get_bundled_dir", lambda: bundled)
+    monkeypatch.setattr(skills_sync, "_get_optional_dir", lambda: tmp_path / "optional")
+    monkeypatch.setattr(skills_sync, "_build_external_skill_index", lambda: set())
+
+    result = sync_skills(quiet=True)
+
+    assert result[skip_key] is True
+    assert not (home / "skills").exists()
 
 
 

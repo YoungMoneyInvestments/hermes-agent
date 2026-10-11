@@ -70,6 +70,48 @@ def test_migrate_config_noop_when_current(monkeypatch):
     assert result == {"ok": True, "skipped": "up-to-date"}
 
 
+@pytest.mark.parametrize(
+    "profile_config,reason",
+    [
+        ("profile:\n  config_only: true\n", "config-only"),
+        ("profile:\n  config_only: 'true'\n", "invalid-profile-config"),
+    ],
+)
+def test_boot_migration_skips_config_only_and_invalid_homes(
+    tmp_path, monkeypatch, profile_config, reason
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("_config_version: 1\n" + profile_config, encoding="utf-8")
+    before = config_path.read_bytes()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    calls = []
+
+    import hermes_cli.config as cfg
+
+    monkeypatch.setattr(cfg, "check_config_version", lambda: calls.append("check"))
+    monkeypatch.setattr(cfg, "migrate_config", lambda **kwargs: calls.append("migrate"))
+
+    assert step_migrate_config() == {"ok": True, "skipped": reason}
+    assert calls == []
+    assert config_path.read_bytes() == before
+    assert not list(tmp_path.glob("config.yaml.bak-*"))
+
+
+def test_boot_skill_sync_skips_config_only_home(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("profile:\n  config_only: true\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    calls = []
+    monkeypatch.setattr(
+        "tools.skills_sync.sync_skills",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    assert post_update.step_sync_skills() == {"ok": True, "skipped": "config-only"}
+    assert calls == []
+    assert not (tmp_path / "skills").exists()
+
+
 def test_migrate_config_restores_backup_when_version_does_not_advance(
     tmp_path, monkeypatch
 ):

@@ -4,6 +4,25 @@ from tools import skills_sync
 from hermes_cli.update_cmd_maint import _print_bundled_skills_sync_report
 
 
+def test_update_report_skips_config_only_profile(tmp_path, monkeypatch, capsys):
+    (tmp_path / "config.yaml").write_text(
+        "profile:\n  config_only: true\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    calls = []
+    monkeypatch.setattr(
+        skills_sync,
+        "sync_skills",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    _print_bundled_skills_sync_report()
+
+    assert calls == []
+    assert "Skills sync skipped (config-only)" in capsys.readouterr().out
+    assert not (tmp_path / "skills").exists()
+
+
 def test_kept_skill_edits_have_an_actionable_update_report(tmp_path, monkeypatch, capsys):
     bundled = tmp_path / "bundled"
     source = bundled / "example/SKILL.md"

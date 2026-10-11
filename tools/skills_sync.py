@@ -396,7 +396,18 @@ def _seed_category_descriptions(bundled_dir: Path, only_dirs: Optional[Set[Path]
 def sync_skills(quiet: bool = False) -> dict:
     """Sync bundled skills into ~/.hermes/skills/ using the manifest; returns the per-category
     result dict. Opted-out profiles seed ONLY ESSENTIAL_SKILLS (the system prompt always
-    points at ``hermes-agent``)."""
+    points at ``hermes-agent``). Config-only or invalid profiles skip all sync work."""
+    from hermes_cli.profiles import _profile_config_only
+
+    config_only = _profile_config_only(_hermes_home())
+    if config_only is not False:
+        result = {
+            "copied": [], "updated": [], "skipped": 0, "user_modified": [], "cleaned": [],
+            "suppressed": [], "total_bundled": 0, "optional_provenance_backfilled": [],
+        }
+        result["skipped_config_only" if config_only is True else "skipped_invalid_config"] = True
+        return result
+
     essential_only = (_hermes_home() / NO_BUNDLED_SKILLS_MARKER).exists()
     if essential_only and not quiet:
         print("  (profile opted out of bundled skills via .no-bundled-skills — seeding essential skills only)")

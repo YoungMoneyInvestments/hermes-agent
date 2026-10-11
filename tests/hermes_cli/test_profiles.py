@@ -458,14 +458,23 @@ class TestNoSkillsOptOut:
         profile_dir.mkdir(parents=True)
         (profile_dir / "config.yaml").write_text("profile:\n  config_only: true\n", encoding="utf-8")
 
-        def unexpected_subprocess(*args, **kwargs):
-            raise AssertionError("config-only profiles must not spawn skill sync")
+        calls = []
 
-        monkeypatch.setattr(profiles.subprocess, "run", unexpected_subprocess)
+        def fake_subprocess(*args, **kwargs):
+            calls.append((args, kwargs))
+            return types.SimpleNamespace(returncode=0, stdout='{"copied": []}', stderr="")
+
+        monkeypatch.setattr(profiles.subprocess, "run", fake_subprocess)
         result = profiles.seed_profile_skills(profile_dir, quiet=True)
 
         assert result["skipped_config_only"] is True
+        assert calls == []
         assert not (profile_dir / "skills").exists()
+
+    def test_profile_null_config_keeps_legacy_default(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("profile: null\n", encoding="utf-8")
+        assert profiles._profile_config_only(tmp_path) is False
 
     @pytest.mark.parametrize("config", [
         "profile:\n  config_only: 'true'\n",
@@ -477,12 +486,17 @@ class TestNoSkillsOptOut:
         profile_dir = get_profile_dir("bad-config")
         profile_dir.mkdir(parents=True)
         (profile_dir / "config.yaml").write_text(config, encoding="utf-8")
+        calls = []
 
-        def unexpected_subprocess(*args, **kwargs):
-            raise AssertionError("invalid profile config must not spawn skill sync")
+        def fake_subprocess(*args, **kwargs):
+            calls.append((args, kwargs))
+            return types.SimpleNamespace(returncode=0, stdout='{"copied": []}', stderr="")
 
-        monkeypatch.setattr(profiles.subprocess, "run", unexpected_subprocess)
-        assert profiles.seed_profile_skills(profile_dir, quiet=True) is None
+        monkeypatch.setattr(profiles.subprocess, "run", fake_subprocess)
+        result = profiles.seed_profile_skills(profile_dir, quiet=True)
+        assert result["skipped_invalid_config"] is True
+        assert result["copied"] == []
+        assert calls == []
 
     def test_profiles_without_opt_in_keep_legacy_skill_sync(self, profile_env, monkeypatch):
         profile_dir = get_profile_dir("legacy-config")
@@ -506,14 +520,20 @@ class TestNoSkillsOptOut:
             "_config_version: 1\nprofile:\n  config_only: true\n", encoding="utf-8"
         )
         before = config_path.read_bytes()
+        calls = []
 
-        def unexpected_migration(*args, **kwargs):
-            raise AssertionError("config-only profiles must not be migrated automatically")
+        def check_version(*args, **kwargs):
+            calls.append(("check", args, kwargs))
+            return 1, 2
 
-        monkeypatch.setattr("hermes_cli.config.check_config_version", unexpected_migration)
-        monkeypatch.setattr("hermes_cli.config.migrate_config", unexpected_migration)
+        def migrate(*args, **kwargs):
+            calls.append(("migrate", args, kwargs))
+
+        monkeypatch.setattr("hermes_cli.config.check_config_version", check_version)
+        monkeypatch.setattr("hermes_cli.config.migrate_config", migrate)
         profiles._migrate_profile_config_if_outdated(profile_dir)
 
+        assert calls == []
         assert config_path.read_bytes() == before
 
 
@@ -554,20 +574,23 @@ class TestBackfillProfileEnvs:
         invalid.mkdir(parents=True)
         (invalid / "config.yaml").write_text("profile:\n  config_only: 'true'\n", encoding="utf-8")
 
-        original_write_text = Path.write_text
+        calls = []
 
-        def reject_env_write(path, *args, **kwargs):
+        def record_write(path, *args, **kwargs):
             if path.name == ".env":
-                raise AssertionError("profile env files must not be created")
-            return original_write_text(path, *args, **kwargs)
+                calls.append(("write", path))
+            return len(args[0]) if args else 0
 
-        def reject_copy(*args, **kwargs):
-            raise AssertionError("profile env files must not be copied")
+        def record_copy(src, dst, *args, **kwargs):
+            calls.append(("copy", Path(src), Path(dst)))
+            return Path(dst)
 
-        monkeypatch.setattr(Path, "write_text", reject_env_write)
-        monkeypatch.setattr(profiles.shutil, "copy2", reject_copy)
+        monkeypatch.setattr(Path, "write_text", record_write)
+        monkeypatch.setattr(profiles.shutil, "copy2", record_copy)
+        monkeypatch.setattr(profiles.os, "chmod", lambda path, mode: calls.append(("chmod", path)))
 
         assert backfill_profile_envs(quiet=True) == []
+        assert calls == []
         assert not (opted / ".env").exists()
         assert not (invalid / ".env").exists()
 

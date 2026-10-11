@@ -524,6 +524,15 @@ def _invalidate_live_plugin_catalog_caches() -> None:
 
 def _print_bundled_skills_sync_report() -> None:
     """Run ``sync_skills`` (copies new, updates changed, respects user deletions) and print its summary."""
+    from hermes_constants import get_hermes_home
+    from hermes_cli.profiles import _profile_config_only
+
+    config_only = _profile_config_only(get_hermes_home())
+    if config_only is not False:
+        reason = "config-only" if config_only is True else "invalid profile config"
+        print(f"  ✓ Skills sync skipped ({reason})")
+        return
+
     from tools.skills_sync import sync_skills
     result = sync_skills(quiet=True)
     if result["copied"]:
@@ -772,6 +781,15 @@ def _run_pre_update_backup(args) -> Optional[str]:
 
     Explicit user opt-out is honored fully. See #34600.
     """
+    from hermes_constants import get_hermes_home
+    from hermes_cli.profiles import _profile_config_only
+
+    config_only = _profile_config_only(get_hermes_home())
+    if config_only is not False:
+        reason = "config-only" if config_only is True else "invalid profile config"
+        print(f"◆ Pre-update backup: skipped ({reason})")
+        return None
+
     mode = _resolve_pre_update_backup_mode(args)
 
     if mode == "off":
@@ -820,6 +838,10 @@ def _sweep_bytecode_after_update(branch: str) -> None:
 
 
 def _profile_skill_sync_status(r) -> str:
+    if r and r.get("skipped_config_only"):
+        return "skipped (config-only)"
+    if r and r.get("skipped_invalid_config"):
+        return "skipped (invalid profile config)"
     if r and r.get("skipped_opt_out"):
         return "opted out (--no-skills)"
     if not r:

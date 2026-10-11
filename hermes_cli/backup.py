@@ -1897,7 +1897,11 @@ def create_pre_update_snapshots_all_profiles(
     """
     results: Dict[str, str] = {}
     home = invoking_home or get_hermes_home()
+    from hermes_cli.profiles import _profile_config_only
+
     for name, profile_home in _sibling_profile_homes(home):
+        if _profile_config_only(profile_home) is not False:
+            continue
         try:
             snap_id = create_quick_snapshot(
                 label="pre-update",
