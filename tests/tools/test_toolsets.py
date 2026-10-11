@@ -59,6 +59,15 @@ class TestGetToolset:
 
 class TestResolveToolset:
 
+    def test_workshop_builtin_survives_fresh_registry(self, monkeypatch):
+        monkeypatch.setattr("tools.registry.registry", ToolRegistry())
+        assert set(resolve_toolset("cami_workshop_files")) == {
+            "terminal", "read_file", "write_file", "patch", "process_manage",
+        }
+        assert set(resolve_toolset("cami_workshop_files", include_registry=False)) == {
+            "terminal", "read_file", "write_file", "patch", "process_manage",
+        }
+
     def test_cycle_detection(self):
         # Create a cycle: A includes B, B includes A
         TOOLSETS["_cycle_a"] = {"description": "test", "tools": ["t1"], "includes": ["_cycle_b"]}
