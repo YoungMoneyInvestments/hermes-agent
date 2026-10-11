@@ -560,9 +560,11 @@ def _is_recoverable_error_job(job: Dict[str, Any]) -> bool:
     recurring job still has a schedule with future occurrences once the underlying issue resolves — it is
     stuck pending a ``next_run_at`` recompute, not truly done. See #16265.
     """
+    schedule = job.get("schedule")
     return (
         job.get("state") == "error"
-        and (job.get("schedule") or {}).get("kind") in {"cron", "interval"}
+        and isinstance(schedule, dict)
+        and schedule.get("kind") in {"cron", "interval"}
     )
 
 
@@ -1252,7 +1254,7 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 
 
 def _interval_anchor_ms(schedule: Dict[str, Any]) -> Optional[int]:
-    """Validate and return the optional absolute UTC millisecond anchor on an interval schedule.
+    """Validate schedule kind and return an optional absolute UTC millisecond interval anchor.
 
     Keep this field deliberately narrow: imported anchored intervals require a positive integral
     minute period and an exact non-negative integer epoch-millisecond anchor. In particular bool,
@@ -1261,9 +1263,12 @@ def _interval_anchor_ms(schedule: Dict[str, Any]) -> Optional[int]:
     """
     if not isinstance(schedule, dict):
         raise ValueError("schedule must be a mapping")
+    kind = schedule.get("kind")
+    if kind not in ("once", "interval", "cron"):
+        raise ValueError("schedule kind must be once, interval, or cron")
     if "anchor_ms" not in schedule:
         return None
-    if schedule.get("kind") != "interval":
+    if kind != "interval":
         raise ValueError("anchor_ms is only valid for interval schedules")
     anchor_ms = schedule["anchor_ms"]
     if type(anchor_ms) is not int or anchor_ms < 0:
@@ -2519,6 +2524,22 @@ def _record_run_outcome(
 def _advance_after_run(job: Dict[str, Any], now: str) -> None:
     """Bump ``repeat.completed`` and recompute ``next_run_at``; retire the record as a terminal
     completion when the repeat limit is reached or a one-shot has no further run."""
+    try:
+        _interval_anchor_ms(job.get("schedule", {}))
+    except ValueError:
+        # A schedule corrupted after dispatch must not let a one-shot look completed before the
+        # persisted schedule error can be repaired.
+        job.update(
+            state="error",
+            last_error=_MALFORMED_ANCHORED_SCHEDULE_ERROR,
+            next_run_at=None,
+        )
+        logger.error(
+            "Job %r has a malformed schedule after its run and cannot be advanced: %s",
+            job.get("name") or job.get("id") or "?",
+            _MALFORMED_ANCHORED_SCHEDULE_ERROR,
+        )
+        return
     # If no next run, decide whether this is terminal completion (one-shot) or a transient failure
     # (recurring schedule couldn't compute — e.g. 'croniter' missing from the runtime env). Recurring jobs
     # must NEVER be silently disabled: that turns a missing runtime dep into "job completed" and the user's
@@ -3047,16 +3068,13 @@ class _DueScan:
 
 
 def _normalize_due_scan_records(raw_jobs: List[Dict[str, Any]]) -> bool:
-    """Repair malformed store records in place BEFORE the due scan keys off them: a missing ``id``
-    (older writers used ``job_id``), non-dict ``schedule``, or non-ISO timestamp used to abort the
-    whole scan before save_jobs(), freezing the scheduler in a fast-forward loop."""
+    """Repair record metadata before scanning while leaving malformed schedules visible to the
+    per-job fail-closed validator. Replacing a bad schedule with ``{}`` would erase its invalid
+    shape and risk dispatching it through fallback paths."""
     changed = False
     for rj in raw_jobs:
         if not rj.get("id"):
             rj["id"] = rj.pop("job_id", None) or uuid.uuid4().hex[:12]
-            changed = True
-        if not isinstance(rj.get("schedule"), dict):
-            rj["schedule"] = {}
             changed = True
         for key in ("next_run_at", "last_run_at"):
             value = rj.get(key)

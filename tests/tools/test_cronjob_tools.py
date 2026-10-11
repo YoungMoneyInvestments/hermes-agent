@@ -280,6 +280,25 @@ class TestUnifiedCronjobTool:
         from cron.jobs import get_job
         assert get_job(job_id)["schedule"]["expr"] == "0 9 * * *"
 
+    def test_update_interval_string_preserves_existing_anchor(self, monkeypatch):
+        from datetime import datetime, timezone
+        from cron.jobs import get_job, update_job
+
+        now = datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        created = json.loads(cronjob(action="create", prompt="Check", schedule="every 1h"))
+        job_id = created["job_id"]
+        update_job(job_id, {
+            "schedule": {"kind": "interval", "minutes": 60, "anchor_ms": 0},
+        })
+
+        updated = json.loads(cronjob(action="update", job_id=job_id, schedule="every 2h"))
+
+        assert updated["success"] is True
+        stored = get_job(job_id)
+        assert stored["schedule"]["minutes"] == 120
+        assert stored["schedule"]["anchor_ms"] == 0
+
     def test_list_handles_partial_legacy_job_records(self):
         from cron.jobs import save_jobs
 

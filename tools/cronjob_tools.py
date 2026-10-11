@@ -918,7 +918,9 @@ def _update_run_fields(job: Dict[str, Any], a: Dict[str, Any], updates: Dict[str
         updates["repeat"] = repeat_state
     if a["schedule"] is not None:
         parsed_schedule = parse_schedule(a["schedule"])
-        updates["schedule"] = parsed_schedule
+        # Preserve the original string through update_job: its intent keeps an existing
+        # interval's anchor even though the schedule was parsed here for validation/display.
+        updates["schedule"] = a["schedule"]
         updates["schedule_display"] = parsed_schedule.get("display", a["schedule"])
         if job.get("state") != "paused":
             updates["state"] = "scheduled"

@@ -6,7 +6,15 @@ into a live one (profile distributions) import this rather than duplicating the 
 """
 from typing import Any, Dict
 
-from cron.jobs import _apply_schedule_update, _jobs_lock, is_job_runnable, load_jobs, parse_schedule, save_jobs
+from cron.jobs import (
+    _apply_schedule_update,
+    _interval_anchor_ms,
+    _jobs_lock,
+    is_job_runnable,
+    load_jobs,
+    parse_schedule,
+    save_jobs,
+)
 from cron.quota_hold import clear_state as _clear_quota_hold
 from hermes_time import now as _hermes_now
 
@@ -29,8 +37,10 @@ def merge_job_definition(local: Dict[str, Any], authored: Dict[str, Any]) -> Dic
         "completed": (local.get("repeat") or {}).get("completed", 0),
         "times": (authored.get("repeat") or {}).get("times"),
     }
+    authored_schedule_was_string = isinstance(authored.get("schedule"), str)
     if isinstance(merged.get("schedule"), str):
         merged["schedule"] = parse_schedule(merged["schedule"])
+    _interval_anchor_ms(merged.get("schedule", {}))
 
     if local.get("schedule") != merged.get("schedule"):
         merged.pop("pending_slot", None)
@@ -39,7 +49,13 @@ def merge_job_definition(local: Dict[str, Any], authored: Dict[str, Any]) -> Dic
             updates = {"schedule": merged["schedule"]}
             if "schedule_display" in authored:
                 updates["schedule_display"] = authored["schedule_display"]
-            _apply_schedule_update(merged, updates, str(merged.get("id") or "imported job"))
+            _apply_schedule_update(
+                merged,
+                updates,
+                str(merged.get("id") or "imported job"),
+                previous_schedule=local.get("schedule"),
+                preserve_anchor_for_interval_string=authored_schedule_was_string,
+            )
         else:
             merged["next_run_at"] = None
     return merged
