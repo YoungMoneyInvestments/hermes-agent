@@ -2165,10 +2165,20 @@ def _apply_schedule_update(
         updated["schedule_display"] = updates["schedule_display"]
     elif updated_schedule.get("display") is not None:
         updated["schedule_display"] = updated_schedule["display"]
-    elif "anchor_ms" in updated_schedule:
-        # The designated raw-dict ingress may omit parser metadata; do not retain a stale label
-        # from the schedule it replaces (for example, hourly text on an anchored weekly interval).
+    elif (
+        updated_schedule.get("kind") == "interval"
+        and type(updated_schedule.get("minutes")) is int
+        and updated_schedule["minutes"] > 0
+    ):
+        # Raw interval dictionaries may omit parser metadata; refresh the native label instead of
+        # retaining stale text from the schedule they replace (anchored or ordinary intervals).
         updated["schedule_display"] = _interval_schedule(updated_schedule["minutes"])["display"]
+    # A visible malformed-schedule error belongs to the old schedule. Clear only our exact marker
+    # after the replacement schedule has passed validation; preserve other errors and pause state.
+    if updated.get("last_error") == _MALFORMED_ANCHORED_SCHEDULE_ERROR:
+        updated["last_error"] = None
+        if updated.get("state") == "error":
+            updated["state"] = "paused" if not updated.get("enabled", True) else "scheduled"
     if updated.get("state") != "paused":
         updated["next_run_at"] = _next_run_or_reject_past_oneshot(
             updated_schedule, updated.get("name", job_id), updated_schedule, "update ")
@@ -2853,6 +2863,10 @@ def claim_job_for_fire(
     def apply(jobs, _i, job):
         if is_terminal_job(job) and not _is_recoverable_error_job(job):
             return False
+        # A paused job is not an authorized fire attempt. Check before parsing its schedule so a
+        # manual webhook or stale callback cannot mutate paused operator state on validation fail.
+        if not force and not is_job_runnable(job):
+            return False
         try:
             _interval_anchor_ms(job.get("schedule", {}))
         except ValueError:
@@ -2868,10 +2882,6 @@ def claim_job_for_fire(
                     _MALFORMED_ANCHORED_SCHEDULE_ERROR,
                 )
                 save_jobs(jobs)
-            return False
-        # Both enabled and pause markers must clear — a half-paused record must not claim. ``force``
-        # (Trigger-now on a paused job) bypasses the gate and atomically resumes the job below.
-        if not force and not is_job_runnable(job):
             return False
         now = _hermes_now()
         if _claim_is_live(job.get("fire_claim"), now, claim_ttl_seconds):

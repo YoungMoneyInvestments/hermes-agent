@@ -491,6 +491,9 @@ class TestComputeNextRun:
         })
 
         assert "anchor_ms" not in changed["schedule"]
+        assert changed["schedule"]["minutes"] // 1440 == 14
+        # Core stores minute-form labels; the existing routine UI renders this as every 14 days.
+        assert changed["schedule_display"] == "every 20160m"
         assert changed["next_run_at"] == (now + timedelta(minutes=20160)).isoformat()
 
     def test_paused_interval_schedule_anchor_removal_clears_elapsed_slot(
@@ -674,10 +677,50 @@ class TestComputeNextRun:
         })
         assert "anchor_ms" not in repaired["schedule"]
         assert repaired["enabled"] is True
+        assert repaired["state"] == "scheduled"
+        assert repaired["last_error"] is None
         assert datetime.fromisoformat(repaired["next_run_at"]) == now + timedelta(minutes=5)
 
         monkeypatch.setattr("cron.jobs._hermes_now", lambda: now + timedelta(minutes=5))
         assert job["id"] in {entry["id"] for entry in get_due_jobs()}
+
+    def test_valid_schedule_repair_preserves_unrelated_error_and_pause_state(self, tmp_cron_dir):
+        job = create_job(prompt="unrelated error", schedule="every 5m", deliver="local")
+        update_job(job["id"], {"state": "error", "last_error": "unrelated provider error"})
+        unchanged = update_job(job["id"], {
+            "schedule": {"kind": "interval", "minutes": 10},
+        })
+        assert unchanged["state"] == "error"
+        assert unchanged["last_error"] == "unrelated provider error"
+
+        paused = create_job(prompt="paused repair", schedule="every 5m", deliver="local")
+        pause_job(paused["id"])
+        rows = load_jobs()
+        row = next(entry for entry in rows if entry["id"] == paused["id"])
+        row.update(
+            schedule={"kind": "interval", "minutes": 5, "anchor_ms": None},
+            last_error="Invalid schedule or anchor; provide a valid schedule or remove anchor_ms before running.",
+        )
+        save_jobs(rows)
+        repaired_paused = update_job(paused["id"], {
+            "schedule": {"kind": "interval", "minutes": 10},
+        })
+        assert repaired_paused["state"] == "paused"
+        assert repaired_paused["enabled"] is False
+        assert repaired_paused["last_error"] is None
+        assert repaired_paused["next_run_at"] is None
+
+    def test_nonforced_claim_does_not_mutate_paused_malformed_schedule(self, tmp_cron_dir):
+        job = create_job(prompt="paused malformed", schedule="every 5m", deliver="local")
+        pause_job(job["id"])
+        rows = load_jobs()
+        row = next(entry for entry in rows if entry["id"] == job["id"])
+        row["schedule"] = {"kind": "interval", "minutes": 5, "anchor_ms": None}
+        save_jobs(rows)
+        before = get_job(job["id"])
+
+        assert claim_job_for_fire(job["id"]) is False
+        assert get_job(job["id"]) == before
 
     def test_anchor_validator_rejects_non_mapping_schedule(self):
         from cron.jobs import _interval_anchor_ms
