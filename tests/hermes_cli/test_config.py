@@ -44,6 +44,70 @@ class TestGetHermesHome:
 
 class TestEnsureHermesHome:
 
+    def test_config_only_home_load_is_read_only_across_a_b_a_override(self, tmp_path):
+        from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+
+        homes = {name: tmp_path / name for name in ("native-a", "native-b")}
+        originals = {}
+        for name, home in homes.items():
+            home.mkdir()
+            config_path = home / "config.yaml"
+            config_path.write_text(
+                f"_config_version: 49\nprofile:\n  config_only: true\nagent:\n  display_name: {name}\n",
+                encoding="utf-8",
+            )
+            originals[name] = config_path.read_bytes()
+
+        for name in ("native-a", "native-b", "native-a"):
+            home = homes[name]
+            token = set_hermes_home_override(home)
+            try:
+                assert get_hermes_home() == home
+                config = load_config()
+                assert config["profile"]["config_only"] is True
+                assert config["agent"]["display_name"] == name
+                assert (home / "config.yaml").read_bytes() == originals[name]
+                assert sorted(path.name for path in home.iterdir()) == ["config.yaml"]
+            finally:
+                reset_hermes_home_override(token)
+
+    @pytest.mark.parametrize(
+        "profile_config",
+        ["profile:\n  config_only: 'true'\n", "profile: [broken-shape]\n"],
+    )
+    def test_invalid_config_fails_closed_for_home_initialization(self, tmp_path, monkeypatch, profile_config):
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(profile_config, encoding="utf-8")
+        before = config_path.read_bytes()
+        initial_entries = sorted(path.name for path in tmp_path.iterdir())
+        token = set_hermes_home_override(tmp_path)
+        try:
+            ensure_hermes_home()
+        finally:
+            reset_hermes_home_override(token)
+
+        assert config_path.read_bytes() == before
+        assert sorted(path.name for path in tmp_path.iterdir()) == initial_entries
+
+    def test_unreadable_config_fails_closed_for_home_initialization(self, tmp_path, monkeypatch):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("profile:\n  config_only: true\n", encoding="utf-8")
+        initial_entries = sorted(path.name for path in tmp_path.iterdir())
+        real_read_text = Path.read_text
+
+        def denied_read(path, *args, **kwargs):
+            if path == config_path:
+                raise PermissionError("read denied for test")
+            return real_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", denied_read)
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            ensure_hermes_home()
+
+        assert sorted(path.name for path in tmp_path.iterdir()) == initial_entries
+
     def test_creates_default_soul_md_if_missing(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
             ensure_hermes_home()

@@ -696,9 +696,16 @@ def _run_quick_snapshots() -> Optional[str]:
     """Quick snapshot of the root home plus every sibling profile; returns the root snapshot id."""
     from hermes_cli.update_cmd import _record_update_step
     from hermes_cli.backup import create_quick_snapshot
-    snapshot_id = create_quick_snapshot(
-        label="pre-update", keep=_PRE_UPDATE_SNAPSHOT_KEEP, max_file_size=_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE,
-    )
+    from hermes_constants import get_hermes_home
+    from hermes_cli.profiles import _profile_config_only
+
+    home = get_hermes_home()
+    snapshot_id = None
+    if _profile_config_only(home) is False:
+        snapshot_id = create_quick_snapshot(
+            label="pre-update", hermes_home=home, keep=_PRE_UPDATE_SNAPSHOT_KEEP,
+            max_file_size=_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE,
+        )
     if snapshot_id:
         _verify_state_db_after_snapshot(snapshot_id)
         print(f"◆ Pre-update snapshot: {snapshot_id}")
@@ -781,15 +788,6 @@ def _run_pre_update_backup(args) -> Optional[str]:
 
     Explicit user opt-out is honored fully. See #34600.
     """
-    from hermes_constants import get_hermes_home
-    from hermes_cli.profiles import _profile_config_only
-
-    config_only = _profile_config_only(get_hermes_home())
-    if config_only is not False:
-        reason = "config-only" if config_only is True else "invalid profile config"
-        print(f"◆ Pre-update backup: skipped ({reason})")
-        return None
-
     mode = _resolve_pre_update_backup_mode(args)
 
     if mode == "off":
@@ -799,6 +797,15 @@ def _run_pre_update_backup(args) -> Optional[str]:
         # Config-level off is silent: the user opted out.
         return None
 
+    from hermes_constants import get_hermes_home
+    from hermes_cli.profiles import _profile_config_only
+
+    config_only = _profile_config_only(get_hermes_home())
+    skip_active_home = config_only is not False
+    if skip_active_home:
+        reason = "config-only" if config_only is True else "invalid profile config"
+        print(f"◆ Pre-update snapshot for active profile skipped ({reason}); checking siblings.")
+
     snapshot_id = None
     try:
         snapshot_id = _run_quick_snapshots()
@@ -807,7 +814,7 @@ def _run_pre_update_backup(args) -> Optional[str]:
         snapshot_detail = f" ({exc})"
     else:
         snapshot_detail = ""
-    if not snapshot_id:
+    if not snapshot_id and not skip_active_home:
         # Best-effort by design (8ed599dc054: a broken backup never blocks the update), but a
         # swallowed failure is how a user discovers post-hoc that the receipt says
         # ``ok: false`` and nothing was there to restore (#114592). Say it on stdout, once,
@@ -816,7 +823,7 @@ def _run_pre_update_backup(args) -> Optional[str]:
         print("  Continuing with update (set updates.pre_update_backup: off to silence this).")
         print()
 
-    if mode != "full":
+    if skip_active_home or mode != "full":
         if snapshot_id:
             print()
         return snapshot_id

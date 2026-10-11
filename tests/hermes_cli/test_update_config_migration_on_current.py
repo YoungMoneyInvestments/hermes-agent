@@ -78,28 +78,36 @@ def test_config_only_update_skips_active_migration_but_keeps_sibling_pass(tmp_pa
 
     active = tmp_path / "profiles" / "staging"
     active.mkdir(parents=True)
+    launch_home = tmp_path / "launch-home"
+    launch_home.mkdir()
     config_path = active / "config.yaml"
     config_path.write_text(
         "_config_version: 1\nprofile:\n  config_only: true\n", encoding="utf-8"
     )
     before = config_path.read_bytes()
     sibling_passes = []
+    active_calls = []
 
-    def unexpected_active_migration(*args, **kwargs):
-        raise AssertionError("config-only active profiles must skip migration checks and writes")
-
-    monkeypatch.setattr(hermes_constants, "get_process_hermes_home", lambda: active)
-    monkeypatch.setattr(config, "get_missing_env_vars", unexpected_active_migration)
-    monkeypatch.setattr(config, "get_missing_config_fields", unexpected_active_migration)
-    monkeypatch.setattr(config, "check_config_version", unexpected_active_migration)
-    monkeypatch.setattr(config, "migrate_config", unexpected_active_migration)
+    monkeypatch.setattr(hermes_constants, "get_process_hermes_home", lambda: launch_home)
+    monkeypatch.setattr(config, "get_missing_env_vars", lambda **kwargs: active_calls.append("env") or [])
+    monkeypatch.setattr(config, "get_missing_config_fields", lambda: active_calls.append("fields") or [])
+    monkeypatch.setattr(config, "check_config_version", lambda **kwargs: active_calls.append("version") or (1, 2))
+    monkeypatch.setattr(
+        config, "migrate_config",
+        lambda **kwargs: active_calls.append("migrate") or {"env_added": [], "config_added": []},
+    )
     monkeypatch.setattr(
         update_cmd, "_migrate_sibling_profile_configs", lambda: sibling_passes.append(True) or []
     )
 
-    update_cmd._check_and_apply_config_migration()
+    token = hermes_constants.set_hermes_home_override(active)
+    try:
+        update_cmd._check_and_apply_config_migration()
+    finally:
+        hermes_constants.reset_hermes_home_override(token)
 
     assert sibling_passes == [True]
+    assert active_calls == []
     assert config_path.read_bytes() == before
     assert "Automatic config migration skipped" in capsys.readouterr().out
 

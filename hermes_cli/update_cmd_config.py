@@ -172,11 +172,11 @@ def _check_and_apply_config_migration(
     from hermes_cli.update_cmd import _migrate_sibling_profile_configs
     from hermes_cli.config import check_config_version, migrate_config
     from hermes_cli.profiles import _profile_config_only
-    from hermes_constants import get_process_hermes_home
+    from hermes_constants import get_hermes_home
 
     print()
     print("→ Checking configuration for new options...")
-    config_only = _profile_config_only(Path(get_process_hermes_home())) is not False
+    config_only = _profile_config_only(Path(get_hermes_home())) is not False
     if config_only:
         print("  ℹ Automatic config migration skipped for config-only or invalid profile config.")
         missing_env = missing_config = []

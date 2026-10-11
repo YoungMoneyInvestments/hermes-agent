@@ -49,6 +49,10 @@ def backup_config(config_path: Path, reason: str, *, keep: int = DEFAULT_KEEP) -
     identical bytes. Never raises: a failed backup must not block the write it precedes.
     """
     try:
+        from hermes_cli.profiles import _profile_config_only
+
+        if _profile_config_only(config_path.parent) is not False:
+            return None
         if not config_path.is_file() or config_path.stat().st_size == 0:
             return None
         root = backups_dir(config_path)

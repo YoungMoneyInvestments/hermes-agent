@@ -15,7 +15,7 @@ import sys
 import time as _time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, Optional
 
 from hermes_cli.config import get_hermes_home  # noqa: F401  (re-exported; patched via update_cmd)
 from hermes_cli import update_handoff as _update_handoff
@@ -238,6 +238,18 @@ def _record_update_skip(step: str, reason: str) -> None:
         record_skip(step, reason)
 
 
+def _config_only_backup_skip_reason() -> Optional[str]:
+    from hermes_constants import get_hermes_home
+    from hermes_cli.profiles import _profile_config_only
+
+    config_only = _profile_config_only(get_hermes_home())
+    if config_only is True:
+        return "active profile is config-only"
+    if config_only is None:
+        return "active profile config is invalid"
+    return None
+
+
 def _record_pre_update_backup_outcome(args, snapshot_id) -> None:
     """Record the pre-update backup as a skip when it was disabled, else as a step.
 
@@ -256,11 +268,18 @@ def _record_pre_update_backup_outcome(args, snapshot_id) -> None:
                   else "disabled by updates.pre_update_backup (mode: off)")
         _record_update_skip("pre_update_backup", reason)
         return
+    reason = _config_only_backup_skip_reason()
+    if reason:
+        _record_update_skip("pre_update_backup", reason)
+        return
     _record_update_step("pre_update_backup", False, "no snapshot captured")
 
 
 def _record_snapshot_stage(args, snapshot_id) -> None:
-    skipped = not snapshot_id and _resolve_pre_update_backup_mode(args) == "off"
+    skipped = not snapshot_id and (
+        _resolve_pre_update_backup_mode(args) == "off"
+        or _config_only_backup_skip_reason() is not None
+    )
     _completion_receipt.record_stage("snapshot", "success" if snapshot_id else "skipped" if skipped else "failed")
 
 

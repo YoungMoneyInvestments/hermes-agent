@@ -569,3 +569,30 @@ class TestPreUpdateBackupStep:
         empty = self._record(monkeypatch, args=args, snapshot_id=None, updates_cfg=updates_cfg)
         assert empty["skips"] == []
         assert [step["ok"] for step in empty["steps"]] == [False]
+
+    @pytest.mark.parametrize(
+        "profile_config,expected_reason",
+        [
+            ("profile:\n  config_only: true\n", "config-only"),
+            ("profile:\n  config_only: 'true'\n", "active profile config is invalid"),
+        ],
+    )
+    def test_config_only_backup_is_recorded_as_skip(
+        self, receipt_home, monkeypatch, profile_config, expected_reason
+    ):
+        (receipt_home / "config.yaml").write_text(profile_config, encoding="utf-8")
+        monkeypatch.setattr(update_cmd_maint, "_load_updates_cfg", lambda: {"pre_update_backup": "quick"})
+        args = SimpleNamespace(no_backup=False, backup=False)
+
+        ur.begin_update_receipt()
+        update_cmd._record_pre_update_backup_outcome(args, None)
+        update_cmd._record_snapshot_stage(args, None)
+        path = _finalize("success")
+
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["steps"] == []
+        skips = [entry for entry in payload["skips"] if entry["name"] == "pre_update_backup"]
+        assert len(skips) == 1
+        assert expected_reason in skips[0]["reason"]
+        stages = [entry for entry in payload["stages"] if entry["name"] == "snapshot"]
+        assert len(stages) == 1 and stages[0]["outcome"] == "skipped"

@@ -65,15 +65,46 @@ class TestAllProfileSnapshots:
         )
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         calls = []
-        monkeypatch.setattr(update_maint, "_resolve_pre_update_backup_mode", lambda args: calls.append("mode"))
-        monkeypatch.setattr(update_maint, "_run_quick_snapshots", lambda: calls.append("snapshot"))
+        monkeypatch.setattr(
+            update_maint, "_resolve_pre_update_backup_mode", lambda args: calls.append("mode") or "quick"
+        )
+        monkeypatch.setattr(update_maint, "_run_quick_snapshots", lambda: calls.append("snapshots") or None)
         monkeypatch.setattr(update_maint, "_run_full_backup", lambda: calls.append("full"))
 
         assert update_maint._run_pre_update_backup(object()) is None
-        assert calls == []
-        assert "skipped (config-only)" in capsys.readouterr().out
+        assert calls == ["mode", "snapshots"]
+        output = capsys.readouterr().out
+        assert "skipped (config-only)" in output
+        assert "snapshot FAILED" not in output
         assert not (tmp_path / "state-snapshots").exists()
         assert not (tmp_path / "backups").exists()
+
+    def test_quick_snapshot_skips_config_only_active_but_keeps_sibling_recovery(
+        self, profiles, monkeypatch
+    ):
+        (profiles["default"] / "config.yaml").write_text(
+            "profile:\n  config_only: true\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("HERMES_HOME", str(profiles["default"]))
+        calls = []
+
+        def fake_snapshot(*, label, hermes_home=None, keep=None, max_file_size=None):
+            calls.append((label, hermes_home))
+            return f"snapshot-{Path(hermes_home).name}"
+
+        monkeypatch.setattr(backup, "create_quick_snapshot", fake_snapshot)
+        assert update_maint._run_quick_snapshots() is None
+
+        assert calls == [
+            ("pre-update", profiles["sparks"]),
+            ("pre-update", profiles["work"]),
+        ]
+        from hermes_cli import update_cmd_config
+
+        assert update_cmd_config._LAST_SIBLING_SNAPSHOTS == {
+            "sparks": "snapshot-sparks",
+            "work": "snapshot-work",
+        }
 
     def test_config_only_sibling_is_skipped_without_blocking_healthy_sibling(
         self, profiles, monkeypatch

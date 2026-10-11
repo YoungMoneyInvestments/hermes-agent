@@ -43,3 +43,29 @@ def test_migration_41_strips_every_profile_soul_once(tmp_path, monkeypatch):
     assert results["config_added"] and "default" in results["config_added"][0] and "worker" in results["config_added"][0]
     _migrate_to_41(results := {"config_added": []}, quiet=True)
     assert results["config_added"] == []  # idempotent: nothing left to strip
+
+
+def test_migration_41_skips_config_only_and_invalid_profile_souls(tmp_path, monkeypatch):
+    from hermes_cli.config_migrations import _migrate_to_41
+
+    home = tmp_path / ".hermes"
+    for name, config in (
+        ("staging", "profile:\n  config_only: true\n"),
+        ("invalid", "profile:\n  config_only: 'true'\n"),
+    ):
+        profile = home / "profiles" / name
+        profile.mkdir(parents=True)
+        (profile / "config.yaml").write_text(config, encoding="utf-8")
+        (profile / "SOUL.md").write_text(LEGACY, encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    (home / "SOUL.md").write_text(LEGACY, encoding="utf-8")
+
+    results = {"config_added": []}
+    _migrate_to_41(results, quiet=True)
+
+    assert (home / "SOUL.md").read_text(encoding="utf-8") == "# Me\n\nBe terse.\n"
+    assert (home / "profiles" / "staging" / "SOUL.md").read_text(encoding="utf-8") == LEGACY
+    assert (home / "profiles" / "invalid" / "SOUL.md").read_text(encoding="utf-8") == LEGACY
+    assert results["config_added"] == [
+        "removed legacy Bot Mode section from SOUL.md (default)"
+    ]
