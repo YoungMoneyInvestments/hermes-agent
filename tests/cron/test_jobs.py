@@ -328,6 +328,56 @@ class TestComputeNextRun:
         # Should be ~60 minutes from now
         assert next_dt > datetime.now().astimezone() + timedelta(minutes=59)
 
+    def test_anchored_interval_preserves_phase_through_dst_update_and_resume(
+        self, tmp_cron_dir, monkeypatch,
+    ):
+        """An absolute anchor keeps its elapsed-time phase through DST and lifecycle updates."""
+        from zoneinfo import ZoneInfo
+
+        chicago = ZoneInfo("America/Chicago")
+        now = datetime(2026, 3, 8, 7, 0, 0, 321000, tzinfo=chicago)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        anchor = datetime(2026, 3, 1, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        anchor_ms = int((anchor - datetime(1970, 1, 1, tzinfo=timezone.utc)) / timedelta(milliseconds=1))
+        schedule = {"kind": "interval", "minutes": 10080, "anchor_ms": anchor_ms}
+
+        result = datetime.fromisoformat(compute_next_run(schedule, last_run_at=now.isoformat()))
+        expected = datetime(2026, 3, 15, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        assert result.astimezone(timezone.utc) == expected
+        assert result.hour == 7 and result.utcoffset() == timedelta(hours=-5)
+
+        job = create_job(prompt="phase test", schedule="every 1h", deliver="local")
+        schedule = {"kind": "interval", "minutes": 10080, "anchor_ms": anchor_ms}
+        updated = update_job(job["id"], {"schedule": schedule})
+        expected_local = "2026-03-15T07:00:00.321000-05:00"
+        assert updated["schedule"]["anchor_ms"] == anchor_ms
+        assert get_job(job["id"])["schedule"]["anchor_ms"] == anchor_ms
+        assert updated["next_run_at"] == expected_local
+
+        pause_job(job["id"])
+        resumed = resume_job(job["id"])
+        assert resumed["next_run_at"] == expected_local
+
+    @pytest.mark.parametrize("bad_schedule", [
+        {"kind": "interval", "minutes": 10, "anchor_ms": True},
+        {"kind": "interval", "minutes": 10, "anchor_ms": 1.5},
+        {"kind": "interval", "minutes": 10, "anchor_ms": "123"},
+        {"kind": "interval", "minutes": 0, "anchor_ms": 123},
+        {"kind": "interval", "minutes": 10.0, "anchor_ms": 123},
+        {"kind": "interval", "minutes": 10, "anchor_ms": 10**50},
+        {"kind": "interval", "minutes": 10**10, "anchor_ms": 123},
+        {"kind": "once", "run_at": "2026-03-08T12:00:00+00:00", "anchor_ms": 123},
+    ])
+    def test_schedule_update_rejects_invalid_interval_anchor(
+        self, bad_schedule, tmp_cron_dir,
+    ):
+        job = create_job(prompt="phase test", schedule="every 1h", deliver="local")
+        pause_job(job["id"])
+        before = get_job(job["id"])["schedule"]
+        with pytest.raises(ValueError, match="anchor_ms|anchored interval"):
+            update_job(job["id"], {"schedule": bad_schedule})
+        assert get_job(job["id"])["schedule"] == before
+
 
 # =========================================================================
 # Job CRUD (with tmp file storage)

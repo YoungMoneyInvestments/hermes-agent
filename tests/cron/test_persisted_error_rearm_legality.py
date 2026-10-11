@@ -104,3 +104,24 @@ class TestCronRearmRespectsScheduleLegality:
         assert any(j["id"] == job["id"] for j in due), (
             "wedged interval job must become due immediately after re-arm"
         )
+
+    def test_anchored_interval_rearms_to_next_phase_slot(self, cron_store):
+        """A stale anchored interval must recover without inventing an off-phase instant."""
+        job = J.create_job(prompt="weekly probe", schedule="every 1h", no_agent=True, script="p.py")
+        now = datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc)
+        anchor = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+        anchor_ms = int((anchor - datetime(1970, 1, 1, tzinfo=timezone.utc)) / timedelta(milliseconds=1))
+        J.update_job(job["id"], {"schedule": {
+            "kind": "interval", "minutes": 10080, "anchor_ms": anchor_ms,
+        }})
+        _wedge(
+            job["id"],
+            next_run_at=datetime(2026, 3, 22, 12, 0, tzinfo=timezone.utc),
+            last_run_at=datetime(2026, 2, 28, 12, 0, tzinfo=timezone.utc),
+        )
+        with mock.patch.object(J, "_hermes_now", lambda: now):
+            due = J.get_due_jobs()
+        assert due == [], "the next phase slot is future-dated and must not dispatch early"
+        recovered = datetime.fromisoformat(J.get_job(job["id"])["next_run_at"])
+        assert recovered == datetime(2026, 3, 15, 12, 0, tzinfo=timezone.utc)
+        assert J.get_persisted_error_recovery_stats()["persisted_error_recoveries"] == 1

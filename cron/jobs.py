@@ -1167,6 +1167,7 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
     if not isinstance(schedule, dict):
         return None
     kind = schedule.get("kind")
+    anchor_ms = _interval_anchor_ms(schedule)
     if kind == "once":
         return _recoverable_oneshot_run_at(schedule, now, last_run_at=last_run_at)
     # Recurring kinds anchor on last_run_at so a restart doesn't re-anchor the schedule.
@@ -1176,7 +1177,23 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
         if minutes is None:
             return None
         # Add in UTC so an interval keeps its duration when the profile's UTC offset changes.
-        next_run = base_time.astimezone(timezone.utc) + timedelta(minutes=minutes)
+        if anchor_ms is None:
+            next_run = base_time.astimezone(timezone.utc) + timedelta(minutes=minutes)
+        else:
+            # OpenClaw's everyMs + anchorMs schedule is an elapsed-time lattice rooted at an
+            # absolute Unix-millisecond instant. Derive the first lattice point strictly after
+            # base_time using integer microseconds: timestamp()/float loses sub-millisecond phase
+            # near epoch-sized values, and wall-clock cron would shift phase at DST boundaries.
+            epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+            base_utc = base_time.astimezone(timezone.utc)
+            base_us = (base_utc - epoch) // timedelta(microseconds=1)
+            anchor_us = anchor_ms * 1000
+            period_us = minutes * 60_000_000
+            steps = max(0, (base_us - anchor_us) // period_us + 1)
+            try:
+                next_run = epoch + timedelta(microseconds=anchor_us + steps * period_us)
+            except OverflowError as exc:
+                raise ValueError("interval anchor_ms produces a datetime outside the supported range") from exc
         return next_run.astimezone(base_time.tzinfo).isoformat()
     if kind == "cron":
         expr = schedule.get("expr")
@@ -1220,6 +1237,34 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
             next_wall = it.get_next(datetime)
         return next_wall.replace(tzinfo=zone).isoformat()
     return None
+
+
+def _interval_anchor_ms(schedule: Dict[str, Any]) -> Optional[int]:
+    """Validate and return the optional absolute UTC millisecond anchor on an interval schedule.
+
+    Keep this field deliberately narrow: imported anchored intervals require a positive integral
+    minute period and an exact non-negative integer epoch-millisecond anchor. In particular bool,
+    float, and string values must not silently become timestamps or periods.
+    """
+    if "anchor_ms" not in schedule:
+        return None
+    if schedule.get("kind") != "interval":
+        raise ValueError("anchor_ms is only valid for interval schedules")
+    anchor_ms = schedule["anchor_ms"]
+    if type(anchor_ms) is not int or anchor_ms < 0:
+        raise ValueError("interval anchor_ms must be a non-negative integer")
+    minutes = schedule.get("minutes")
+    if type(minutes) is not int or minutes <= 0:
+        raise ValueError("anchored interval minutes must be a positive integer")
+    try:
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        anchor_time = epoch + timedelta(milliseconds=anchor_ms)
+        period = timedelta(minutes=minutes)
+        if period > datetime.max.replace(tzinfo=timezone.utc) - anchor_time:
+            raise OverflowError("interval period exceeds the datetime range")
+    except OverflowError as exc:
+        raise ValueError("anchored interval timestamp or period is outside the supported range") from exc
+    return anchor_ms
 
 
 # --- Ticker heartbeat (liveness signal for `hermes cron status`) ---
@@ -2068,6 +2113,7 @@ def _apply_schedule_update(updated: Dict[str, Any], updates: Dict[str, Any], job
     if isinstance(updated_schedule, str):
         updated_schedule = parse_schedule(updated_schedule)
         updated["schedule"] = updated_schedule
+    _interval_anchor_ms(updated_schedule)
     updated["schedule_display"] = updates.get(
         "schedule_display", updated_schedule.get("display", updated.get("schedule_display")))
     if updated.get("state") != "paused":
@@ -3033,8 +3079,12 @@ def _rearm_stale_error_recurring(d: _DueJob) -> datetime:
     ):
         return d.next_run_dt
     if d.kind == "interval":
-        recovered_next = now.isoformat()
-        recovered_next_dt: Optional[datetime] = now
+        if "anchor_ms" in d.schedule:
+            recovered_next = d.recompute_next()
+            recovered_next_dt = _parse_aware(recovered_next) if recovered_next else None
+        else:
+            recovered_next = now.isoformat()
+            recovered_next_dt = now
     else:
         recovered_next = d.recompute_next()
         recovered_next_dt = _parse_aware(recovered_next) if recovered_next else None
