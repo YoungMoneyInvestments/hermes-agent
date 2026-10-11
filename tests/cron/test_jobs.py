@@ -690,6 +690,59 @@ class TestComputeNextRun:
         assert failed["next_run_at"] is None
         assert claim_job_for_fire(malformed["id"]) is False
 
+    @pytest.mark.parametrize("bad_schedule", ["legacy schedule", {}, {"kind": "future-schedule"}])
+    def test_malformed_schedule_diagnostic_can_be_repaired_and_resumed(
+        self, tmp_cron_dir, monkeypatch, bad_schedule,
+    ):
+        from cron.jobs import _MALFORMED_ANCHORED_SCHEDULE_ERROR
+
+        now = datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        job = create_job(prompt="malformed repair", schedule="every 5m", deliver="local")
+        pause_job(job["id"])
+        rows = load_jobs()
+        row = next(entry for entry in rows if entry["id"] == job["id"])
+        row.update(
+            schedule=bad_schedule,
+            state="error",
+            last_error=_MALFORMED_ANCHORED_SCHEDULE_ERROR,
+            next_run_at=None,
+        )
+        save_jobs(rows)
+
+        with pytest.raises(ValueError, match="Cannot resume.*Invalid schedule or anchor"):
+            resume_job(job["id"])
+        still_invalid = get_job(job["id"])
+        assert still_invalid["schedule"] == bad_schedule
+        assert still_invalid["enabled"] is False
+        assert still_invalid["state"] == "error"
+
+        repaired = update_job(job["id"], {
+            "schedule": {"kind": "interval", "minutes": 5},
+        })
+        assert repaired["schedule"]["kind"] == "interval"
+        assert repaired["enabled"] is False
+        assert repaired["state"] == "paused"
+        assert repaired["last_error"] is None
+        assert repaired["next_run_at"] is None
+
+        resumed = resume_job(job["id"])
+        assert resumed["enabled"] is True
+        assert resumed["state"] == "scheduled"
+        assert resumed["next_run_at"]
+
+    def test_live_fire_claim_is_untouched_by_malformed_schedule_check(self, tmp_cron_dir):
+        job = create_job(prompt="live owner", schedule="every 5m", deliver="local")
+        assert claim_job_for_fire(job["id"])
+        rows = load_jobs()
+        row = next(entry for entry in rows if entry["id"] == job["id"])
+        row["schedule"] = "legacy schedule"
+        save_jobs(rows)
+        before = get_job(job["id"])
+
+        assert claim_job_for_fire(job["id"]) is False
+        assert get_job(job["id"]) == before
+
     def test_direct_claim_persists_malformed_anchor_error(self, tmp_cron_dir):
         job = create_job(prompt="direct malformed claim", schedule="every 5m", deliver="local")
         rows = load_jobs()
@@ -824,6 +877,74 @@ class TestComputeNextRun:
         assert merged["schedule"]["anchor_ms"] == anchor_ms
         next_run = datetime.fromisoformat(merged["next_run_at"])
         assert (next_run - anchor) % timedelta(minutes=120) == timedelta(0)
+
+    def test_import_without_schedule_preserves_legacy_record_and_healthy_sibling(
+        self, tmp_cron_dir,
+    ):
+        from cron.job_definition import import_job_definitions
+
+        malformed = create_job(prompt="legacy local", schedule="every 5m", deliver="local")
+        healthy = create_job(prompt="healthy sibling", schedule="every 5m", deliver="local")
+        rows = load_jobs()
+        next(row for row in rows if row["id"] == malformed["id"])["schedule"] = "legacy schedule"
+        save_jobs(rows)
+
+        import_job_definitions({
+            malformed["id"]: {"name": "Updated legacy name"},
+            healthy["id"]: {"schedule": "every 2h"},
+        }, paused_reason="test import")
+
+        assert get_job(malformed["id"])["schedule"] == "legacy schedule"
+        assert get_job(malformed["id"])["name"] == "Updated legacy name"
+        assert get_job(healthy["id"])["schedule"]["minutes"] == 120
+
+    def test_import_without_schedule_leaves_valid_schedule_state_unchanged(self):
+        from cron.job_definition import merge_job_definition
+
+        local = {
+            "id": "schedule-not-authored",
+            "name": "Local schedule",
+            "schedule": {"kind": "interval", "minutes": 60},
+            "schedule_display": "every 60m",
+            "next_run_at": "2026-03-08T13:00:00+00:00",
+            "pending_slot": {"scheduled_at": "2026-03-08T12:00:00+00:00"},
+            "enabled": True,
+            "state": "scheduled",
+        }
+
+        merged = merge_job_definition(local, {"name": "Updated without schedule"})
+
+        assert merged["schedule"] == local["schedule"]
+        assert merged["schedule_display"] == local["schedule_display"]
+        assert merged["next_run_at"] == local["next_run_at"]
+        assert merged["pending_slot"] == local["pending_slot"]
+
+    def test_paused_authored_interval_string_reimport_preserves_anchor(self, monkeypatch):
+        from cron.job_definition import merge_job_definition
+
+        now = datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        anchor = datetime(2026, 3, 1, 9, 0, 0, 123000, tzinfo=timezone.utc)
+        anchor_ms = int(anchor.timestamp() * 1000)
+        local = {
+            "id": "paused-authored-anchor",
+            "name": "Paused anchored interval",
+            "prompt": "Check",
+            "schedule": {"kind": "interval", "minutes": 10080, "anchor_ms": anchor_ms},
+            "schedule_display": "every 10080m",
+            "next_run_at": None,
+            "enabled": False,
+            "state": "paused",
+            "repeat": {"times": None, "completed": 0},
+        }
+
+        merged = merge_job_definition(local, {"schedule": "every 7d"})
+
+        assert merged["schedule"]["minutes"] == 10080
+        assert merged["schedule"]["anchor_ms"] == anchor_ms
+        assert merged["enabled"] is False
+        assert merged["state"] == "paused"
+        assert merged["next_run_at"] is None
 
     def test_invalid_once_anchor_cannot_be_marked_completed(self, tmp_cron_dir):
         job = create_job(

@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cron.jobs import (
     AmbiguousJobReference,
+    _MALFORMED_ANCHORED_SCHEDULE_ERROR,
     claim_job_for_fire,
     get_job,
     is_job_runnable,
@@ -247,6 +248,8 @@ def _claim_for_manual_run(job_id: str, log_label: str):
         refreshed = get_job(job_id)
         if refreshed is None:
             reason = "Job no longer exists; nothing to run."
+        elif refreshed.get("last_error") == _MALFORMED_ANCHORED_SCHEDULE_ERROR:
+            reason = _MALFORMED_ANCHORED_SCHEDULE_ERROR
         elif not is_job_runnable(refreshed):
             reason = "Job is paused/disabled; resume it before running."
         else:

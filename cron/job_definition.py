@@ -33,14 +33,25 @@ def merge_job_definition(local: Dict[str, Any], authored: Dict[str, Any]) -> Dic
     past one-shot for a live job)."""
     merged = {key: value for key, value in local.items() if key not in JOB_DEFINITION_FIELDS}
     merged.update((key, authored[key]) for key in JOB_DEFINITION_FIELDS if key in authored)
+    # Schedules are scheduler-owned required state as well as an authored definition field: an
+    # omitted incoming schedule means retain the local schedule, not erase or revalidate it.
+    if "schedule" not in authored and "schedule" in local:
+        merged["schedule"] = local["schedule"]
+    if "schedule_display" not in authored and "schedule_display" in local:
+        merged["schedule_display"] = local["schedule_display"]
     merged["repeat"] = {
         "completed": (local.get("repeat") or {}).get("completed", 0),
         "times": (authored.get("repeat") or {}).get("times"),
     }
+    authored_schedule_present = "schedule" in authored
     authored_schedule_was_string = isinstance(authored.get("schedule"), str)
-    if isinstance(merged.get("schedule"), str):
+    if authored_schedule_was_string:
         merged["schedule"] = parse_schedule(merged["schedule"])
-    _interval_anchor_ms(merged.get("schedule", {}))
+    # Validate only schedules supplied by the definition. A missing authored field leaves the
+    # local schedule untouched, including legacy malformed values that the runtime can surface
+    # and repair independently.
+    if authored_schedule_present:
+        _interval_anchor_ms(merged.get("schedule", {}))
 
     if local.get("schedule") != merged.get("schedule"):
         merged.pop("pending_slot", None)
@@ -57,6 +68,24 @@ def merge_job_definition(local: Dict[str, Any], authored: Dict[str, Any]) -> Dic
                 preserve_anchor_for_interval_string=authored_schedule_was_string,
             )
         else:
+            # The common updater owns phase preservation for runnable jobs. Paused and terminal
+            # records still need the same string-edit semantics without recomputing a due instant.
+            previous_schedule = local.get("schedule")
+            schedule = merged.get("schedule")
+            if (
+                authored_schedule_was_string
+                and isinstance(previous_schedule, dict)
+                and previous_schedule.get("kind") == "interval"
+                and isinstance(schedule, dict)
+                and schedule.get("kind") == "interval"
+            ):
+                try:
+                    previous_anchor = _interval_anchor_ms(previous_schedule)
+                except ValueError:
+                    previous_anchor = None
+                if previous_anchor is not None:
+                    schedule["anchor_ms"] = previous_anchor
+                    _interval_anchor_ms(schedule)
             merged["next_run_at"] = None
     return merged
 

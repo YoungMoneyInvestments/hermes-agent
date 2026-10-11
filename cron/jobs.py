@@ -551,15 +551,23 @@ def is_terminal_job(job: Dict[str, Any]) -> bool:
 
 
 def _is_recoverable_error_job(job: Dict[str, Any]) -> bool:
-    """True for a recurring job stuck in ``state=error`` (set ONLY when ``compute_next_run()`` fails
-    for a cron/interval job: croniter missing, malformed schedule). Such a job still has future
-    occurrences once the issue resolves, so treating it as terminal would block due-scan self-heal,
-    pre-advance, dispatch claim and ``resume_job`` — wedging it forever.
+    """True for recurring or explicitly repairable malformed-schedule jobs in ``state=error``.
+
+    Such records still have future occurrences once repaired, so treating them as terminal would
+    block due-scan self-heal, pre-advance, dispatch claim and resume — wedging them forever.
 
     Unlike ``state=completed`` (a one-shot that genuinely has no more occurrences, ever), an error-state
     recurring job still has a schedule with future occurrences once the underlying issue resolves — it is
     stuck pending a ``next_run_at`` recompute, not truly done. See #16265.
     """
+    if (
+        job.get("state") == "error"
+        and job.get("last_error") == _MALFORMED_ANCHORED_SCHEDULE_ERROR
+    ):
+        # This exact diagnostic is an operator-repairable bad persisted schedule, regardless of
+        # whether the corrupt value is a mapping. Allow schedule replacement, but resume validates
+        # the value before reading kind or activating the job.
+        return True
     schedule = job.get("schedule")
     return (
         job.get("state") == "error"
@@ -2289,6 +2297,10 @@ def resume_job(job_id: str) -> Optional[Dict[str, Any]]:
     job = resolve_job_ref(job_id)
     if not job:
         return None
+    try:
+        _interval_anchor_ms(job.get("schedule", {}))
+    except ValueError as exc:
+        raise ValueError(f"Cannot resume: {_MALFORMED_ANCHORED_SCHEDULE_ERROR}") from exc
     stored_next = job.get("next_run_at")
     stored_dt = _parse_aware(stored_next) if stored_next else None
     if (
@@ -2889,6 +2901,9 @@ def claim_job_for_fire(
         # manual webhook or stale callback cannot mutate paused operator state on validation fail.
         if not force and not is_job_runnable(job):
             return False
+        now = _hermes_now()
+        if _claim_is_live(job.get("fire_claim"), now, claim_ttl_seconds):
+            return False  # do not inspect or persist a record owned by a live fire
         try:
             _interval_anchor_ms(job.get("schedule", {}))
         except ValueError:
@@ -2905,9 +2920,6 @@ def claim_job_for_fire(
                 )
                 save_jobs(jobs)
             return False
-        now = _hermes_now()
-        if _claim_is_live(job.get("fire_claim"), now, claim_ttl_seconds):
-            return False  # someone holds a fresh claim
         from cron.occurrences import completed_occurrence, scheduled_instant
 
         # ``manual`` (an off-tick run-now) must NOT stamp an occurrence identity: outside a

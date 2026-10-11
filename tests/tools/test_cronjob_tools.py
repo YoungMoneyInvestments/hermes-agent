@@ -225,6 +225,54 @@ class TestUnifiedCronjobTool:
         monkeypatch.setattr("cron.jobs.JOBS_FILE", tmp_path / "cron" / "jobs.json")
         monkeypatch.setattr("cron.jobs.OUTPUT_DIR", tmp_path / "cron" / "output")
 
+    def test_manual_run_reports_persisted_malformed_schedule_diagnostic(self):
+        from cron.jobs import create_job, get_job, load_jobs, save_jobs
+        from cron.jobs import _MALFORMED_ANCHORED_SCHEDULE_ERROR
+        from tools.cronjob_tools import _claim_for_manual_run
+
+        job = create_job(prompt="bad schedule manual run", schedule="every 5m", deliver="local")
+        rows = load_jobs()
+        row = next(entry for entry in rows if entry["id"] == job["id"])
+        row["schedule"] = "legacy schedule"
+        save_jobs(rows)
+
+        claimed, result = _claim_for_manual_run(job["id"], "test")
+
+        assert claimed is None
+        assert result["error"] == _MALFORMED_ANCHORED_SCHEDULE_ERROR
+        assert get_job(job["id"])["last_error"] == _MALFORMED_ANCHORED_SCHEDULE_ERROR
+
+    def test_update_tool_repairs_malformed_persisted_schedule(self):
+        from cron.jobs import (
+            _MALFORMED_ANCHORED_SCHEDULE_ERROR,
+            create_job,
+            get_job,
+            load_jobs,
+            save_jobs,
+        )
+
+        job = create_job(prompt="tool schedule repair", schedule="every 5m", deliver="local")
+        rows = load_jobs()
+        row = next(entry for entry in rows if entry["id"] == job["id"])
+        row.update(
+            schedule={"kind": "future-schedule"},
+            state="error",
+            last_error=_MALFORMED_ANCHORED_SCHEDULE_ERROR,
+            next_run_at=None,
+        )
+        save_jobs(rows)
+
+        result = json.loads(cronjob(
+            action="update", job_id=job["id"], schedule="every 10m",
+        ))
+
+        assert result["success"] is True
+        stored = get_job(job["id"])
+        assert stored["schedule"]["kind"] == "interval"
+        assert stored["schedule"]["minutes"] == 10
+        assert stored["state"] == "scheduled"
+        assert stored["last_error"] is None
+
     def test_create_and_list(self):
         created = json.loads(
             cronjob(
