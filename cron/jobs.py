@@ -1170,8 +1170,8 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
     try:
         anchor_ms = _interval_anchor_ms(schedule)
     except ValueError as exc:
-        # A hand-edited or legacy record can bypass update_job's write validation. Never let one
-        # malformed persisted schedule abort a batch advance or silently run as unanchored.
+        # A hand-edited or legacy anchored record can bypass update_job's write validation. Never
+        # let one malformed persisted anchor abort a batch advance or silently run unanchored.
         logger.warning("Cannot compute next run for malformed %s schedule: %s", kind, exc)
         return None
     if kind == "once":
@@ -2120,8 +2120,14 @@ def _apply_schedule_update(updated: Dict[str, Any], updates: Dict[str, Any], job
         updated_schedule = parse_schedule(updated_schedule)
         updated["schedule"] = updated_schedule
     _interval_anchor_ms(updated_schedule)
-    updated["schedule_display"] = updates.get(
-        "schedule_display", updated_schedule.get("display", updated.get("schedule_display")))
+    if "schedule_display" in updates:
+        updated["schedule_display"] = updates["schedule_display"]
+    elif updated_schedule.get("display") is not None:
+        updated["schedule_display"] = updated_schedule["display"]
+    elif "anchor_ms" in updated_schedule:
+        # The designated raw-dict ingress may omit parser metadata; do not retain a stale label
+        # from the schedule it replaces (for example, hourly text on an anchored weekly interval).
+        updated["schedule_display"] = _interval_schedule(updated_schedule["minutes"])["display"]
     if updated.get("state") != "paused":
         updated["next_run_at"] = _next_run_or_reject_past_oneshot(
             updated_schedule, updated.get("name", job_id), updated_schedule, "update ")

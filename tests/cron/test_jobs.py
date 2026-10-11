@@ -339,7 +339,7 @@ class TestComputeNextRun:
         monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
         anchor = datetime(2026, 3, 1, 12, 0, 0, 321000, tzinfo=timezone.utc)
         anchor_ms = int((anchor - datetime(1970, 1, 1, tzinfo=timezone.utc)) / timedelta(milliseconds=1))
-        schedule = {**parse_schedule("every 10080m"), "anchor_ms": anchor_ms}
+        schedule = {"kind": "interval", "minutes": 10080, "anchor_ms": anchor_ms}
 
         result = datetime.fromisoformat(compute_next_run(schedule, last_run_at=now.isoformat()))
         expected = datetime(2026, 3, 15, 12, 0, 0, 321000, tzinfo=timezone.utc)
@@ -350,6 +350,7 @@ class TestComputeNextRun:
         updated = update_job(job["id"], {"schedule": schedule})
         expected_local = "2026-03-15T07:00:00.321000-05:00"
         assert updated["schedule"]["anchor_ms"] == anchor_ms
+        assert updated["schedule_display"] == "every 10080m"
         assert get_job(job["id"])["schedule"]["anchor_ms"] == anchor_ms
         assert updated["next_run_at"] == expected_local
 
@@ -396,6 +397,29 @@ class TestComputeNextRun:
         assert edited["next_run_at"] is None
         resumed = resume_job(job["id"])
         assert resumed["next_run_at"] == "2026-03-15T12:00:00.321000+00:00"
+
+    def test_anchored_long_outage_fast_forward_stays_on_interval_lattice(
+        self, tmp_cron_dir, monkeypatch,
+    ):
+        now = datetime(2026, 3, 23, 13, 17, 0, 123000, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        anchor = datetime(2026, 3, 1, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        anchor_ms = int((anchor - datetime(1970, 1, 1, tzinfo=timezone.utc)) / timedelta(milliseconds=1))
+        schedule = {"kind": "interval", "minutes": 10080, "anchor_ms": anchor_ms}
+        job = create_job(prompt="outage phase test", schedule="every 1h", deliver="local")
+        update_job(job["id"], {"schedule": schedule})
+
+        # The stored occurrence is more than a weekly grace window stale. Catch-up still fires
+        # once, while the provisional next slot remains on the absolute weekly lattice.
+        overdue = datetime(2026, 3, 8, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        update_job(job["id"], {"next_run_at": overdue.isoformat()})
+        due = get_due_jobs()
+
+        assert [entry["id"] for entry in due] == [job["id"]]
+        actual_next = datetime.fromisoformat(get_job(job["id"])["next_run_at"])
+        expected_next = datetime(2026, 3, 29, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        assert actual_next == expected_next
+        assert (actual_next - anchor) % timedelta(minutes=10080) == timedelta(0)
 
     @pytest.mark.parametrize("bad_schedule", [
         {"kind": "interval", "minutes": 10, "anchor_ms": True},
