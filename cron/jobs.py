@@ -34,6 +34,10 @@ from typing import Optional, Dict, List, Any, Callable, Set, Tuple, Union, Colle
 
 logger = logging.getLogger(__name__)
 
+_MALFORMED_ANCHORED_SCHEDULE_ERROR = (
+    "Invalid anchored interval schedule; update the interval schedule before running."
+)
+
 from hermes_time import now as _hermes_now
 from hermes_time import get_timezone
 from hermes_cli.observability.shared_metrics_gateway import record_cron_missed
@@ -1186,9 +1190,9 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
         if anchor_ms is None:
             next_run = base_time.astimezone(timezone.utc) + timedelta(minutes=minutes)
         else:
-            # OpenClaw's everyMs + anchorMs schedule is an elapsed-time lattice rooted at an
-            # absolute Unix-millisecond instant. Before the anchor, the schedule starts at that
-            # anchor; at or after it, choose the first lattice point strictly after base_time.
+            # An absolute anchor defines an elapsed-time lattice rooted at its Unix-millisecond
+            # instant. Before the anchor, the schedule starts at that anchor; at or after it,
+            # choose the first lattice point strictly after base_time.
             # Integer microseconds preserve sub-millisecond phase; wall-clock cron would shift it
             # at DST boundaries.
             epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -1199,8 +1203,8 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
             steps = max(0, (base_us - anchor_us) // period_us + 1)
             try:
                 next_run = epoch + timedelta(microseconds=anchor_us + steps * period_us)
-            except (OverflowError, ValueError) as exc:
-                logger.warning("Cannot compute next run for anchored interval: %s", exc)
+            except (OverflowError, ValueError):
+                logger.warning("Cannot compute next run for anchored interval: datetime range exceeded")
                 return None
         return next_run.astimezone(base_time.tzinfo).isoformat()
     if kind == "cron":
@@ -1254,6 +1258,8 @@ def _interval_anchor_ms(schedule: Dict[str, Any]) -> Optional[int]:
     minute period and an exact non-negative integer epoch-millisecond anchor. In particular bool,
     float, and string values must not silently become timestamps or periods.
     """
+    if not isinstance(schedule, dict):
+        raise ValueError("schedule must be a mapping")
     if "anchor_ms" not in schedule:
         return None
     if schedule.get("kind") != "interval":
@@ -1273,6 +1279,15 @@ def _interval_anchor_ms(schedule: Dict[str, Any]) -> Optional[int]:
     except OverflowError as exc:
         raise ValueError("anchored interval timestamp or period is outside the supported range") from exc
     return anchor_ms
+
+
+def _anchored_schedule_error_needed(job: Dict[str, Any]) -> bool:
+    """Avoid repeating the malformed-interval warning once its visible error is persisted."""
+    return not (
+        job.get("state") == "error"
+        and job.get("last_error") == _MALFORMED_ANCHORED_SCHEDULE_ERROR
+        and job.get("next_run_at") is None
+    )
 
 
 # --- Ticker heartbeat (liveness signal for `hermes cron status`) ---
@@ -2519,9 +2534,14 @@ def _advance_after_run(job: Dict[str, Any], now: str) -> None:
         # dep into "job completed" and silently drop the schedule.
         job["state"] = "error"
         if not job.get("last_error"):
-            job["last_error"] = (
-                "Failed to compute next run for recurring schedule (is the 'croniter' package "
-                "installed in the gateway's Python env?)")
+            if kind == "interval" and "anchor_ms" in job.get("schedule", {}):
+                job["last_error"] = (
+                    "Failed to compute next run for anchored interval: datetime range exceeded "
+                    "or schedule is invalid.")
+            else:
+                job["last_error"] = (
+                    "Failed to compute next run for recurring schedule (is the 'croniter' package "
+                    "installed in the gateway's Python env?)")
         logger.error(
             "Job '%s' (%s) could not compute next_run_at; "
             "leaving enabled and marking state=error so the job is not silently disabled.",
@@ -2828,10 +2848,19 @@ def claim_job_for_fire(
             return False
         try:
             _interval_anchor_ms(job.get("schedule", {}))
-        except ValueError as exc:
-            logger.warning(
-                "Refusing to fire cron job %r with malformed schedule: %s",
-                job.get("name") or job.get("id") or "?", exc)
+        except ValueError:
+            if _anchored_schedule_error_needed(job):
+                job.update(
+                    state="error",
+                    last_error=_MALFORMED_ANCHORED_SCHEDULE_ERROR,
+                    next_run_at=None,
+                )
+                logger.error(
+                    "Job %r has a malformed schedule and cannot be fired: %s",
+                    job.get("name") or job.get("id") or "?",
+                    _MALFORMED_ANCHORED_SCHEDULE_ERROR,
+                )
+                save_jobs(jobs)
             return False
         # Both enabled and pause markers must clear — a half-paused record must not claim. ``force``
         # (Trigger-now on a paused job) bypasses the gate and atomically resumes the job below.
@@ -3316,12 +3345,21 @@ def _evaluate_due_job(job: Dict[str, Any], scan: _DueScan, run_claim_ttl: float)
     now = scan.now
     try:
         _interval_anchor_ms(job.get("schedule", {}))
-    except ValueError as exc:
+    except ValueError:
         # A malformed anchored record can otherwise have a due stored next_run_at and reach the
         # scheduler's batch pre-advance before compute_next_run validates it.
-        logger.warning(
-            "Skipping cron job %r with malformed schedule: %s",
-            job.get("name") or job.get("id") or "?", exc)
+        raw_job = scan.find(job.get("id"))
+        if raw_job is not None and _anchored_schedule_error_needed(raw_job):
+            scan.persist(
+                job["id"], state="error",
+                last_error=_MALFORMED_ANCHORED_SCHEDULE_ERROR,
+                next_run_at=None,
+            )
+            logger.error(
+                "Job %r has a malformed schedule and cannot be scheduled: %s",
+                job.get("name") or job.get("id") or "?",
+                _MALFORMED_ANCHORED_SCHEDULE_ERROR,
+            )
         return False
     # Cross-process guard: another process's live one-shot run_claim (younger than TTL) — do NOT
     # re-dispatch. Malformed/future-dated claims (clock/TZ skew) count as stale, never eternally

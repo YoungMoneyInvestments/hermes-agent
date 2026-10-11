@@ -495,7 +495,9 @@ class TestComputeNextRun:
         resumed = resume_job(job["id"])
         assert resumed["next_run_at"] == "2026-03-15T12:00:00.321000+00:00"
 
-    def test_anchored_next_run_overflow_fails_closed(self, monkeypatch):
+    def test_anchored_next_run_overflow_fails_closed_with_visible_range_error(
+        self, tmp_cron_dir, monkeypatch, caplog,
+    ):
         monkeypatch.setattr(
             "cron.jobs._hermes_now",
             lambda: datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc),
@@ -505,6 +507,21 @@ class TestComputeNextRun:
             {"kind": "interval", "minutes": 1, "anchor_ms": 0},
             last_run_at="9999-12-31T23:59:59.999999+00:00",
         ) is None
+        assert "datetime range exceeded" in caplog.text
+
+        job = create_job(prompt="range error visibility", schedule="every 1m", deliver="local")
+        update_job(job["id"], {
+            "schedule": {"kind": "interval", "minutes": 1, "anchor_ms": 0},
+        })
+        monkeypatch.setattr(
+            "cron.jobs._hermes_now",
+            lambda: datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc),
+        )
+        assert mark_job_run(job["id"], success=True)
+        updated = get_job(job["id"])
+        assert updated["state"] == "error"
+        assert "datetime range" in updated["last_error"].lower()
+        assert "croniter" not in updated["last_error"].lower()
 
     def test_anchored_long_outage_fast_forward_stays_on_interval_lattice(
         self, tmp_cron_dir, monkeypatch,
@@ -534,6 +551,7 @@ class TestComputeNextRun:
         assert (actual_next - anchor) % timedelta(minutes=10080) == timedelta(0)
 
     @pytest.mark.parametrize("bad_schedule", [
+        {"kind": "interval", "minutes": 10, "anchor_ms": -1},
         {"kind": "interval", "minutes": 10, "anchor_ms": True},
         {"kind": "interval", "minutes": 10, "anchor_ms": 1.5},
         {"kind": "interval", "minutes": 10, "anchor_ms": "123"},
@@ -554,7 +572,7 @@ class TestComputeNextRun:
         assert get_job(job["id"])["schedule"] == before
 
     def test_malformed_persisted_anchor_fails_closed_without_aborting_batch(
-        self, tmp_cron_dir, monkeypatch,
+        self, tmp_cron_dir, monkeypatch, caplog,
     ):
         now = datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc)
         monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
@@ -574,16 +592,48 @@ class TestComputeNextRun:
         due = get_due_jobs()
         assert malformed["id"] not in {job["id"] for job in due}
         assert healthy["id"] in {job["id"] for job in due}
+        visible_error = get_job(malformed["id"])
+        assert visible_error["state"] == "error"
+        assert visible_error["last_error"]
+        assert visible_error["next_run_at"] is None
+        first_warning_count = caplog.text.count("malformed schedule and cannot be scheduled")
+        assert first_warning_count == 1
+
+        # Re-scans remain quiet for the already-visible condition and healthy jobs continue.
+        due_again = get_due_jobs()
+        assert malformed["id"] not in {job["id"] for job in due_again}
+        assert healthy["id"] in {job["id"] for job in due_again}
+        assert caplog.text.count("malformed schedule and cannot be scheduled") == first_warning_count
         assert claim_job_for_fire(malformed["id"]) is False
+        assert get_job(malformed["id"])["state"] == "error"
 
         # The due-set preadvance must skip the corrupt row and continue advancing its sibling.
         from cron.jobs import advance_next_runs
 
         assert advance_next_runs([malformed["id"], healthy["id"]]) == 1
-        assert get_job(malformed["id"])["next_run_at"] == due_at
+        assert get_job(malformed["id"])["next_run_at"] is None
         assert datetime.fromisoformat(
             get_job(healthy["id"])["next_run_at"]
         ) == now + timedelta(minutes=5)
+
+    def test_direct_claim_persists_malformed_anchor_error(self, tmp_cron_dir):
+        job = create_job(prompt="direct malformed claim", schedule="every 5m", deliver="local")
+        rows = load_jobs()
+        row = next(entry for entry in rows if entry["id"] == job["id"])
+        row["schedule"] = {"kind": "interval", "minutes": 5, "anchor_ms": -1}
+        save_jobs(rows)
+
+        assert claim_job_for_fire(job["id"]) is False
+        updated = get_job(job["id"])
+        assert updated["state"] == "error"
+        assert updated["last_error"]
+        assert updated["next_run_at"] is None
+
+    def test_anchor_validator_rejects_non_mapping_schedule(self):
+        from cron.jobs import _interval_anchor_ms
+
+        with pytest.raises(ValueError, match="schedule must be a mapping"):
+            _interval_anchor_ms(None)
 
 
 # =========================================================================
