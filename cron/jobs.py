@@ -35,7 +35,7 @@ from typing import Optional, Dict, List, Any, Callable, Set, Tuple, Union, Colle
 logger = logging.getLogger(__name__)
 
 _MALFORMED_ANCHORED_SCHEDULE_ERROR = (
-    "Invalid anchored interval schedule; update the interval schedule before running."
+    "Invalid schedule or anchor; provide a valid schedule or remove anchor_ms before running."
 )
 
 from hermes_time import now as _hermes_now
@@ -1256,7 +1256,8 @@ def _interval_anchor_ms(schedule: Dict[str, Any]) -> Optional[int]:
 
     Keep this field deliberately narrow: imported anchored intervals require a positive integral
     minute period and an exact non-negative integer epoch-millisecond anchor. In particular bool,
-    float, and string values must not silently become timestamps or periods.
+    float, and string values must not silently become timestamps or periods. Absence means an
+    ordinary unanchored interval; a present null value is invalid.
     """
     if not isinstance(schedule, dict):
         raise ValueError("schedule must be a mapping")
@@ -2135,7 +2136,12 @@ def _apply_schedule_update(
     previous_schedule: Optional[Dict[str, Any]] = None,
     preserve_anchor_for_interval_string: bool = False,
 ) -> None:
-    """Parse a string schedule, refresh ``schedule_display`` and (unless paused) ``next_run_at``."""
+    """Refresh schedule metadata and its next run.
+
+    Rephrasing an interval as a string preserves an existing absolute phase. Supplying a schedule
+    dictionary is an explicit replacement, so omission of ``anchor_ms`` resets to an unanchored
+    interval; a present null anchor remains invalid.
+    """
     updated_schedule = updated["schedule"]
     if isinstance(updated_schedule, str):
         updated_schedule = parse_schedule(updated_schedule)
@@ -2151,7 +2157,8 @@ def _apply_schedule_update(
         except ValueError:
             previous_anchor = None
         if previous_anchor is not None:
-            # A string edit changes interval cadence text, not the absolute phase origin.
+            # A string edit changes interval cadence text, not the absolute phase origin. A dict
+            # replacement does not enter this branch and can intentionally remove the anchor.
             updated_schedule["anchor_ms"] = previous_anchor
     _interval_anchor_ms(updated_schedule)
     if "schedule_display" in updates:

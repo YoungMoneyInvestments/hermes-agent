@@ -474,6 +474,25 @@ class TestComputeNextRun:
         assert changed["schedule"]["anchor_ms"] == anchor_ms
         assert changed["next_run_at"] == "2026-03-15T12:00:00.321000+00:00"
 
+    def test_explicit_interval_dict_without_anchor_resets_to_unanchored_cadence(
+        self, tmp_cron_dir, monkeypatch,
+    ):
+        now = datetime(2026, 3, 8, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        anchor = datetime(2026, 3, 1, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        anchor_ms = int((anchor - datetime(1970, 1, 1, tzinfo=timezone.utc)) / timedelta(milliseconds=1))
+        job = create_job(prompt="dict resets phase", schedule="every 1h", deliver="local")
+        update_job(job["id"], {"schedule": {
+            "kind": "interval", "minutes": 10080, "anchor_ms": anchor_ms,
+        }})
+
+        changed = update_job(job["id"], {
+            "schedule": {"kind": "interval", "minutes": 20160},
+        })
+
+        assert "anchor_ms" not in changed["schedule"]
+        assert changed["next_run_at"] == (now + timedelta(minutes=20160)).isoformat()
+
     def test_paused_interval_schedule_anchor_removal_clears_elapsed_slot(
         self, tmp_cron_dir, monkeypatch,
     ):
@@ -551,6 +570,7 @@ class TestComputeNextRun:
         assert (actual_next - anchor) % timedelta(minutes=10080) == timedelta(0)
 
     @pytest.mark.parametrize("bad_schedule", [
+        {"kind": "interval", "minutes": 10, "anchor_ms": None},
         {"kind": "interval", "minutes": 10, "anchor_ms": -1},
         {"kind": "interval", "minutes": 10, "anchor_ms": True},
         {"kind": "interval", "minutes": 10, "anchor_ms": 1.5},
@@ -628,6 +648,36 @@ class TestComputeNextRun:
         assert updated["state"] == "error"
         assert updated["last_error"]
         assert updated["next_run_at"] is None
+
+    def test_nullable_persisted_anchor_is_visible_and_repairable(
+        self, tmp_cron_dir, monkeypatch,
+    ):
+        now = datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        job = create_job(prompt="nullable malformed anchor", schedule="every 5m", deliver="local")
+        rows = load_jobs()
+        row = next(entry for entry in rows if entry["id"] == job["id"])
+        row["schedule"] = {"kind": "interval", "minutes": 5, "anchor_ms": None}
+        row["next_run_at"] = (now - timedelta(minutes=1)).isoformat()
+        save_jobs(rows)
+
+        assert job["id"] not in {entry["id"] for entry in get_due_jobs()}
+        malformed = get_job(job["id"])
+        assert malformed["enabled"] is True
+        assert malformed["state"] == "error"
+        assert malformed["last_error"]
+        assert "remove anchor_ms" in malformed["last_error"]
+        assert malformed["next_run_at"] is None
+
+        repaired = update_job(job["id"], {
+            "schedule": {"kind": "interval", "minutes": 5},
+        })
+        assert "anchor_ms" not in repaired["schedule"]
+        assert repaired["enabled"] is True
+        assert datetime.fromisoformat(repaired["next_run_at"]) == now + timedelta(minutes=5)
+
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now + timedelta(minutes=5))
+        assert job["id"] in {entry["id"] for entry in get_due_jobs()}
 
     def test_anchor_validator_rejects_non_mapping_schedule(self):
         from cron.jobs import _interval_anchor_ms
