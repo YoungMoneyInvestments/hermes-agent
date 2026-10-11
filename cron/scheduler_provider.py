@@ -344,7 +344,9 @@ def fire_overdue_jobs(
         # One-shot jobs share the module-wide policy: more than ONESHOT_GRACE_SECONDS past their run time
         # means "will never fire" (create/update/resume/recovery and, since #89571, the due-scan all enforce
         # it). The misfire backstop must not resurrect them hours late after downtime — that's #93526.
-        schedule = job.get("schedule") or {}
+        schedule = job.get("schedule")
+        if not isinstance(schedule, dict):
+            continue
         if str(schedule.get("kind") or "") == "once" and overdue_seconds > ONESHOT_GRACE_SECONDS:
             logger.warning(
                 "Misfire catch-up: one-shot job %s (%s) was due %s "

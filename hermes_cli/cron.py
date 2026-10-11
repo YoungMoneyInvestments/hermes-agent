@@ -236,6 +236,11 @@ def _job_rows(job: Dict[str, Any]) -> List[tuple[str, str]]:
     monitor_source = job.get("monitor_script") or job.get("monitor_url")
     mon_state = job.get("monitor_state") or {}
     latest_execution = job.get("latest_execution") or {}
+    schedule = job.get("schedule")
+    if "schedule_display" in job:
+        schedule_display = job["schedule_display"]
+    else:
+        schedule_display = schedule.get("value", "?") if isinstance(schedule, dict) else "?"
     optional = [
         ("Skills", ", ".join(skills) if skills else ""),
         ("Script", job.get("script")),
@@ -253,7 +258,7 @@ def _job_rows(job: Dict[str, Any]) -> List[tuple[str, str]]:
          if latest_execution else "")]
     return [
         ("Name", job.get("name", "(unnamed)")),
-        ("Schedule", job.get("schedule_display", job.get("schedule", {}).get("value", "?"))),
+        ("Schedule", schedule_display),
         ("Repeat", f"{repeat_info.get('completed', 0)}/{repeat_times}" if repeat_times else "∞"),
         _next_run_row(job),
         ("Deliver", deliver if isinstance(deliver, str) else ", ".join(deliver)),

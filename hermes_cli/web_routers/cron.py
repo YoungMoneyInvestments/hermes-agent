@@ -639,6 +639,10 @@ def _trigger_cron_job_sync(job_id: str, profile: Optional[str] = None):
     if refreshed and refreshed.get("last_run_at") != job.get("last_run_at"):
         return refreshed
     if not ran:
+        from cron.jobs import _MALFORMED_ANCHORED_SCHEDULE_ERROR
+
+        if refreshed and refreshed.get("last_error") == _MALFORMED_ANCHORED_SCHEDULE_ERROR:
+            raise HTTPException(status_code=409, detail=_MALFORMED_ANCHORED_SCHEDULE_ERROR)
         raise HTTPException(status_code=409, detail="Job is already running or was claimed by another scheduler")
     if refreshed:
         return refreshed

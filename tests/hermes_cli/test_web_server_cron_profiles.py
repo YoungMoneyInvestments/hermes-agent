@@ -606,6 +606,43 @@ async def test_trigger_cron_job_reports_lost_claim_as_conflict(
     assert exc.value.status_code == 409
 
 
+def test_trigger_cron_job_surfaces_malformed_schedule_diagnostic(
+    isolated_profiles,
+    monkeypatch,
+):
+    from cron import jobs as cron_jobs
+
+    job = _web_server_cron._call_cron_for_profile(
+        "worker_alpha",
+        "create_job",
+        prompt="paused malformed trigger",
+        schedule="every 1h",
+        name="paused-malformed-trigger",
+    )
+    _web_server_cron._call_cron_for_profile("worker_alpha", "pause_job", job["id"])
+    rows = _web_server_cron._call_cron_for_profile("worker_alpha", "load_jobs")
+    next(row for row in rows if row["id"] == job["id"])["schedule"] = "legacy schedule"
+    _web_server_cron._call_cron_for_profile("worker_alpha", "save_jobs", rows)
+
+    class MalformedScheduleProvider:
+        def fire_due(self, job_id, *, adapters=None, loop=None, force=False):
+            return cron_jobs.claim_job_for_fire(job_id, force=force)
+
+    monkeypatch.setattr(
+        "cron.scheduler_provider.resolve_cron_scheduler",
+        lambda: MalformedScheduleProvider(),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        _rt_cron._trigger_cron_job_sync(job["id"], profile="worker_alpha")
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == cron_jobs._MALFORMED_ANCHORED_SCHEDULE_ERROR
+    assert _web_server_cron._call_cron_for_profile(
+        "worker_alpha", "get_job", job["id"],
+    )["last_error"] == cron_jobs._MALFORMED_ANCHORED_SCHEDULE_ERROR
+
+
 @pytest.mark.asyncio
 async def test_trigger_cron_job_forces_paused_job_atomically(
     isolated_profiles,

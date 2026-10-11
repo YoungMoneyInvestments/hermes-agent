@@ -24,6 +24,25 @@ def tmp_cron_dir(tmp_path, monkeypatch):
 
 class TestCronCommandLifecycle:
 
+    def test_list_tolerates_nonmapping_schedule_on_diagnostic_job(self, tmp_cron_dir, capsys):
+        from cron.jobs import _MALFORMED_ANCHORED_SCHEDULE_ERROR
+
+        job = create_job(prompt="malformed list", schedule="every 5m")
+        jobs = load_jobs()
+        jobs[0].update(
+            schedule="legacy schedule",
+            state="error",
+            last_error=_MALFORMED_ANCHORED_SCHEDULE_ERROR,
+            next_run_at=None,
+        )
+        save_jobs(jobs)
+
+        cron_command(Namespace(cron_command="list", all=True, json=False))
+
+        output = capsys.readouterr().out
+        assert job["id"] in output
+        assert "Schedule:" in output
+
     def test_edit_persists_user_owned_inference_pins(self, tmp_cron_dir, capsys):
         job = create_job(prompt="Daily report", schedule="every 1h")
         parser = argparse.ArgumentParser(prog="hermes")

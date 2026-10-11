@@ -66,6 +66,20 @@ def _park_in_past(job_id, minutes):
 
 
 class TestFireOverdueJobs:
+    def test_malformed_schedule_does_not_abort_healthy_overdue_sibling(self, tmp_cron_dir):
+        malformed = create_job(prompt="malformed overdue", schedule="every 1h")
+        healthy = create_job(prompt="healthy overdue", schedule="every 1h")
+        _park_in_past(malformed["id"], minutes=30)
+        _park_in_past(healthy["id"], minutes=30)
+        rows = load_jobs()
+        next(row for row in rows if row["id"] == malformed["id"])["schedule"] = "legacy schedule"
+        save_jobs(rows)
+        provider = RecordingProvider()
+
+        assert fire_overdue_jobs(provider) == 1
+        assert provider.wait_fired()
+        assert provider.fired == [healthy["id"]]
+
     def test_noop_for_builtin_provider(self, tmp_cron_dir):
         """The in-process ticker self-heals past-due jobs — the sweep must
         never double-dispatch under it."""
