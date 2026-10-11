@@ -55,7 +55,7 @@ def _ensure_directory(path: Path, *, create: bool, secure: bool, home: Path) -> 
 def initialize_home(home: Path, subdirs: tuple[str, ...], ensured: set[str]) -> None:
     from hermes_cli.profiles import _profile_config_only
 
-    if _profile_config_only(home) is not False:
+    if _profile_config_only(home) is True:
         return
 
     from hermes_cli.config import _ensure_default_soul_md, is_managed

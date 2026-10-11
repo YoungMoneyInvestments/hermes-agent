@@ -75,13 +75,12 @@ class TestEnsureHermesHome:
         "profile_config",
         ["profile:\n  config_only: 'true'\n", "profile: [broken-shape]\n"],
     )
-    def test_invalid_config_fails_closed_for_home_initialization(self, tmp_path, monkeypatch, profile_config):
+    def test_invalid_config_keeps_home_initialization_hardening(self, tmp_path, profile_config):
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
         config_path = tmp_path / "config.yaml"
         config_path.write_text(profile_config, encoding="utf-8")
         before = config_path.read_bytes()
-        initial_entries = sorted(path.name for path in tmp_path.iterdir())
         token = set_hermes_home_override(tmp_path)
         try:
             ensure_hermes_home()
@@ -89,12 +88,12 @@ class TestEnsureHermesHome:
             reset_hermes_home_override(token)
 
         assert config_path.read_bytes() == before
-        assert sorted(path.name for path in tmp_path.iterdir()) == initial_entries
+        assert (tmp_path / "cron").is_dir()
+        assert (tmp_path / "SOUL.md").is_file()
 
-    def test_unreadable_config_fails_closed_for_home_initialization(self, tmp_path, monkeypatch):
+    def test_unreadable_config_keeps_home_initialization_hardening(self, tmp_path, monkeypatch):
         config_path = tmp_path / "config.yaml"
         config_path.write_text("profile:\n  config_only: true\n", encoding="utf-8")
-        initial_entries = sorted(path.name for path in tmp_path.iterdir())
         real_read_text = Path.read_text
 
         def denied_read(path, *args, **kwargs):
@@ -106,7 +105,8 @@ class TestEnsureHermesHome:
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
             ensure_hermes_home()
 
-        assert sorted(path.name for path in tmp_path.iterdir()) == initial_entries
+        assert (tmp_path / "cron").is_dir()
+        assert (tmp_path / "SOUL.md").is_file()
 
     def test_creates_default_soul_md_if_missing(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):

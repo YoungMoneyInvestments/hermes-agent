@@ -43,15 +43,9 @@ def test_legacy_siblings_move_but_user_named_copies_stay(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
-    "contents",
-    [
-        "profile:\n  config_only: true\n",
-        "profile:\n  config_only: 'true'\n",
-        "profile: [broken-shape]\n",
-        "profile: [\n",
-    ],
+    "contents", ["profile:\n  config_only: true\n"]
 )
-def test_config_only_or_invalid_home_skips_backup_before_directory_creation(tmp_path, contents):
+def test_config_only_home_skips_backup_before_directory_creation(tmp_path, contents):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(contents, encoding="utf-8")
 
@@ -81,9 +75,10 @@ def test_legacy_home_still_reaches_backup_writer_with_absent_null_or_false_profi
     assert calls == [(cfg, backup)]
 
 
-def test_unreadable_profile_config_skips_backup_before_directory_creation(tmp_path, monkeypatch):
+def test_unreadable_profile_config_keeps_corrupt_backup_recovery(tmp_path, monkeypatch):
     cfg = tmp_path / "config.yaml"
-    cfg.write_text("profile:\n  config_only: true\n", encoding="utf-8")
+    contents = "profile:\n  config_only: 'true'\n"
+    cfg.write_text(contents, encoding="utf-8")
     real_read_text = Path.read_text
 
     def denied_read(path, *args, **kwargs):
@@ -93,5 +88,16 @@ def test_unreadable_profile_config_skips_backup_before_directory_creation(tmp_pa
 
     monkeypatch.setattr(Path, "read_text", denied_read)
 
-    assert backup_config(cfg, "good") is None
-    assert not (tmp_path / "backups").exists()
+    backup = backup_config(cfg, "corrupt")
+
+    assert backup is not None and backup.read_text(encoding="utf-8") == contents
+
+
+def test_malformed_yaml_keeps_corrupt_backup_recovery(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    contents = "profile: [broken\n"
+    cfg.write_text(contents, encoding="utf-8")
+
+    backup = backup_config(cfg, "corrupt")
+
+    assert backup is not None and backup.read_text(encoding="utf-8") == contents
