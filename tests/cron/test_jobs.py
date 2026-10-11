@@ -339,7 +339,7 @@ class TestComputeNextRun:
         monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
         anchor = datetime(2026, 3, 1, 12, 0, 0, 321000, tzinfo=timezone.utc)
         anchor_ms = int((anchor - datetime(1970, 1, 1, tzinfo=timezone.utc)) / timedelta(milliseconds=1))
-        schedule = {"kind": "interval", "minutes": 10080, "anchor_ms": anchor_ms}
+        schedule = {**parse_schedule("every 10080m"), "anchor_ms": anchor_ms}
 
         result = datetime.fromisoformat(compute_next_run(schedule, last_run_at=now.isoformat()))
         expected = datetime(2026, 3, 15, 12, 0, 0, 321000, tzinfo=timezone.utc)
@@ -347,7 +347,6 @@ class TestComputeNextRun:
         assert result.hour == 7 and result.utcoffset() == timedelta(hours=-5)
 
         job = create_job(prompt="phase test", schedule="every 1h", deliver="local")
-        schedule = {"kind": "interval", "minutes": 10080, "anchor_ms": anchor_ms}
         updated = update_job(job["id"], {"schedule": schedule})
         expected_local = "2026-03-15T07:00:00.321000-05:00"
         assert updated["schedule"]["anchor_ms"] == anchor_ms
@@ -357,6 +356,46 @@ class TestComputeNextRun:
         pause_job(job["id"])
         resumed = resume_job(job["id"])
         assert resumed["next_run_at"] == expected_local
+        assert resumed["schedule_display"] == "every 10080m"
+
+        # The predispatch advance and completion rearm both use the same absolute lattice.
+        update_job(job["id"], {"next_run_at": now.isoformat()})
+        assert advance_next_run(job["id"])
+        assert get_job(job["id"])["next_run_at"] == expected_local
+        assert mark_job_run(job["id"], success=True)
+        assert get_job(job["id"])["next_run_at"] == expected_local
+
+        # Epoch itself is a valid anchor and the first strict successor is one full period later.
+        epoch_successor = datetime.fromisoformat(compute_next_run(
+            {"kind": "interval", "minutes": 1, "anchor_ms": 0},
+            last_run_at="1970-01-01T00:00:00+00:00",
+        ))
+        assert epoch_successor.astimezone(timezone.utc) == datetime(
+            1970, 1, 1, 0, 1, tzinfo=timezone.utc,
+        )
+        zero_job = create_job(prompt="zero anchor", schedule="every 1m", deliver="local")
+        zero_schedule = {**parse_schedule("every 1m"), "anchor_ms": 0}
+        zero_updated = update_job(zero_job["id"], {"schedule": zero_schedule})
+        assert zero_updated["schedule"]["anchor_ms"] == 0
+        assert zero_updated["next_run_at"] == compute_next_run(zero_schedule)
+
+    def test_paused_anchored_schedule_edit_discards_old_due_slot_before_resume(
+        self, tmp_cron_dir, monkeypatch,
+    ):
+        now = datetime(2026, 3, 8, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        job = create_job(prompt="paused phase test", schedule="every 1h", deliver="local")
+        update_job(job["id"], {"next_run_at": (now - timedelta(minutes=5)).isoformat()})
+        pause_job(job["id"])
+        anchor = datetime(2026, 3, 1, 12, 0, 0, 321000, tzinfo=timezone.utc)
+        anchor_ms = int((anchor - datetime(1970, 1, 1, tzinfo=timezone.utc)) / timedelta(milliseconds=1))
+
+        edited = update_job(job["id"], {
+            "schedule": {**parse_schedule("every 10080m"), "anchor_ms": anchor_ms},
+        })
+        assert edited["next_run_at"] is None
+        resumed = resume_job(job["id"])
+        assert resumed["next_run_at"] == "2026-03-15T12:00:00.321000+00:00"
 
     @pytest.mark.parametrize("bad_schedule", [
         {"kind": "interval", "minutes": 10, "anchor_ms": True},
@@ -377,6 +416,38 @@ class TestComputeNextRun:
         with pytest.raises(ValueError, match="anchor_ms|anchored interval"):
             update_job(job["id"], {"schedule": bad_schedule})
         assert get_job(job["id"])["schedule"] == before
+
+    def test_malformed_persisted_anchor_fails_closed_without_aborting_batch(
+        self, tmp_cron_dir, monkeypatch,
+    ):
+        now = datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+        malformed = create_job(prompt="malformed", schedule="every 5m", deliver="local")
+        healthy = create_job(prompt="healthy", schedule="every 5m", deliver="local")
+        due_at = (now - timedelta(minutes=1)).isoformat()
+        rows = load_jobs()
+        for row in rows:
+            row["next_run_at"] = due_at
+            if row["id"] == malformed["id"]:
+                row["schedule"] = {"kind": "interval", "minutes": 5, "anchor_ms": True}
+        save_jobs(rows)
+
+        assert compute_next_run(
+            {"kind": "interval", "minutes": 5, "anchor_ms": True},
+        ) is None
+        due = get_due_jobs()
+        assert malformed["id"] not in {job["id"] for job in due}
+        assert healthy["id"] in {job["id"] for job in due}
+        assert claim_job_for_fire(malformed["id"]) is False
+
+        # The due-set preadvance must skip the corrupt row and continue advancing its sibling.
+        from cron.jobs import advance_next_runs
+
+        assert advance_next_runs([malformed["id"], healthy["id"]]) == 1
+        assert get_job(malformed["id"])["next_run_at"] == due_at
+        assert datetime.fromisoformat(
+            get_job(healthy["id"])["next_run_at"]
+        ) == now + timedelta(minutes=5)
 
 
 # =========================================================================

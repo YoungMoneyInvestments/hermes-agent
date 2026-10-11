@@ -1167,7 +1167,13 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
     if not isinstance(schedule, dict):
         return None
     kind = schedule.get("kind")
-    anchor_ms = _interval_anchor_ms(schedule)
+    try:
+        anchor_ms = _interval_anchor_ms(schedule)
+    except ValueError as exc:
+        # A hand-edited or legacy record can bypass update_job's write validation. Never let one
+        # malformed persisted schedule abort a batch advance or silently run as unanchored.
+        logger.warning("Cannot compute next run for malformed %s schedule: %s", kind, exc)
+        return None
     if kind == "once":
         return _recoverable_oneshot_run_at(schedule, now, last_run_at=last_run_at)
     # Recurring kinds anchor on last_run_at so a restart doesn't re-anchor the schedule.
@@ -2119,6 +2125,10 @@ def _apply_schedule_update(updated: Dict[str, Any], updates: Dict[str, Any], job
     if updated.get("state") != "paused":
         updated["next_run_at"] = _next_run_or_reject_past_oneshot(
             updated_schedule, updated.get("name", job_id), updated_schedule, "update ")
+    elif "anchor_ms" in updated_schedule:
+        # A paused schedule edit supersedes the prior schedule's possibly elapsed occurrence.
+        # resume_job recomputes from the new anchored lattice when next_run_at is absent.
+        updated["next_run_at"] = None
 
 
 def _fill_missing_next_run(updated: Dict[str, Any]) -> None:
@@ -2781,6 +2791,13 @@ def claim_job_for_fire(
     def apply(jobs, _i, job):
         if is_terminal_job(job) and not _is_recoverable_error_job(job):
             return False
+        try:
+            _interval_anchor_ms(job.get("schedule", {}))
+        except ValueError as exc:
+            logger.warning(
+                "Refusing to fire cron job %r with malformed schedule: %s",
+                job.get("name") or job.get("id") or "?", exc)
+            return False
         # Both enabled and pause markers must clear — a half-paused record must not claim. ``force``
         # (Trigger-now on a paused job) bypasses the gate and atomically resumes the job below.
         if not force and not is_job_runnable(job):
@@ -3260,6 +3277,15 @@ def _evaluate_due_job(job: Dict[str, Any], scan: _DueScan, run_claim_ttl: float)
     recurring jobs; then once due: re-anchor stale cron instants, fast-forward missed recurring
     runs, retire/guard one-shots, and finally stamp the run claim / dispatch record."""
     now = scan.now
+    try:
+        _interval_anchor_ms(job.get("schedule", {}))
+    except ValueError as exc:
+        # A malformed anchored record can otherwise have a due stored next_run_at and reach the
+        # scheduler's batch pre-advance before compute_next_run validates it.
+        logger.warning(
+            "Skipping cron job %r with malformed schedule: %s",
+            job.get("name") or job.get("id") or "?", exc)
+        return False
     # Cross-process guard: another process's live one-shot run_claim (younger than TTL) — do NOT
     # re-dispatch. Malformed/future-dated claims (clock/TZ skew) count as stale, never eternally
     # fresh.
