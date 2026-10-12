@@ -239,19 +239,21 @@ def reset_secret_source_cache(hermes_home: str | os.PathLike | None = None) -> N
     ``hermes_home`` limits the reset to ONE home: a multiplex gateway keeps every profile's snapshot in
     this process, and a per-fire cron re-pull or a plugin-discovery refresh for one home must not wipe
     a sibling's hydrated snapshot — the sibling's next scope build would run empty until it re-hydrated
-    (#102041)."""
-    if hermes_home is None:
-        _APPLIED_HOMES.clear()
-        _SECRET_SOURCES.clear()
-        _SOURCE_SUPPLIED_NAMES.clear()
-        _SECRET_SOURCE_VALUES_BY_HOME.clear()
-        _SECRET_SOURCE_RESTORE_BY_HOME.clear()
-        _SECRET_SOURCE_WRITES_BY_HOME.clear()
-        return
-    home_key = str(Path(hermes_home).resolve())
-    _APPLIED_HOMES.discard(home_key)
-    _SECRET_SOURCE_VALUES_BY_HOME.pop(home_key, None)
-    _SECRET_SOURCE_RESTORE_BY_HOME.pop(home_key, None)
+    (#102041). Sharing the hydration lock prevents an in-flight fetch from publishing stale data after
+    its home is reset."""
+    with _SECRET_SOURCE_CACHE_LOCK:
+        if hermes_home is None:
+            _APPLIED_HOMES.clear()
+            _SECRET_SOURCES.clear()
+            _SOURCE_SUPPLIED_NAMES.clear()
+            _SECRET_SOURCE_VALUES_BY_HOME.clear()
+            _SECRET_SOURCE_RESTORE_BY_HOME.clear()
+            _SECRET_SOURCE_WRITES_BY_HOME.clear()
+            return
+        home_key = str(Path(hermes_home).resolve())
+        _APPLIED_HOMES.discard(home_key)
+        _SECRET_SOURCE_VALUES_BY_HOME.pop(home_key, None)
+        _SECRET_SOURCE_RESTORE_BY_HOME.pop(home_key, None)
 
 
 def format_secret_source_suffix(env_var: str) -> str:

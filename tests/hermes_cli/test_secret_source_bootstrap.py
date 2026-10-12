@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -272,6 +273,99 @@ def _write_plugin_home(home: Path, *, plugin_enabled: bool) -> None:
     enabled = "[fixture-secret-source]" if plugin_enabled else "[]"
     (home / "config.yaml").write_text(
         f"plugins:\n  enabled: {enabled}\nsecrets:\n  fixturevault:\n    enabled: true\n", encoding="utf-8")
+
+
+def test_profile_secret_cache_reset_waits_for_inflight_fetch(monkeypatch, tmp_path):
+    """Reset must serialize with hydration, so an older blocked fetch cannot republish a stale
+    profile snapshot after invalidation."""
+    from agent.secret_sources import registry
+    from agent.secret_sources.registry import AppliedVar, ApplyReport, SourceReport
+    from hermes_cli import env_loader
+
+    home = tmp_path / "profile"
+    home.mkdir()
+    references = {"value": "ref:old"}
+    first_fetch_started = threading.Event()
+    release_first_fetch = threading.Event()
+    reset_lock_attempted = threading.Event()
+    reset_finished = threading.Event()
+    apply_calls = []
+    results = []
+    failures = []
+    monkeypatch.setattr(env_loader, "_APPLIED_HOMES", set())
+    monkeypatch.setattr(env_loader, "_SECRET_SOURCES", {})
+    monkeypatch.setattr(env_loader, "_SOURCE_SUPPLIED_NAMES", set())
+    monkeypatch.setattr(env_loader, "_SECRET_SOURCE_VALUES_BY_HOME", {})
+    monkeypatch.setattr(env_loader, "_SECRET_SOURCE_RESTORE_BY_HOME", {})
+    source_cache_lock = env_loader._SECRET_SOURCE_CACHE_LOCK
+
+    class ObservedLock:
+        def __enter__(self):
+            if threading.current_thread().name == "reset-secret-cache":
+                reset_lock_attempted.set()
+            source_cache_lock.acquire()
+            return self
+
+        def __exit__(self, *_exc):
+            source_cache_lock.release()
+
+    monkeypatch.setattr(env_loader, "_SECRET_SOURCE_CACHE_LOCK", ObservedLock())
+    monkeypatch.setattr(env_loader, "_load_secrets_config", lambda _home: {
+        "command": {"reference": references["value"]},
+    })
+
+    def apply_reference(cfg, _home, *, environ):
+        apply_calls.append(cfg["command"]["reference"])
+        value = cfg["command"]["reference"]
+        if len(apply_calls) == 1:
+            first_fetch_started.set()
+            if not release_first_fetch.wait(5):
+                raise TimeoutError("test did not release the first fetch")
+        environ["OPENROUTER_API_KEY"] = value
+        return ApplyReport(
+            sources=[SourceReport(name="command", label="command", result=FetchResult(),
+                                  applied=["OPENROUTER_API_KEY"])],
+            provenance={"OPENROUTER_API_KEY": AppliedVar(
+                name="OPENROUTER_API_KEY", source="command", shape="mapped", overrode_env=False,
+            )},
+        )
+
+    monkeypatch.setattr(registry, "apply_all", apply_reference)
+
+    def hydrate_first():
+        try:
+            results.append(env_loader.hydrate_profile_secret_sources(home))
+        except BaseException as exc:  # surfaced in the main test thread
+            failures.append(exc)
+
+    def reset_home():
+        env_loader.reset_secret_source_cache(home)
+        reset_finished.set()
+
+    fetch_thread = threading.Thread(target=hydrate_first)
+    fetch_thread.start()
+    reset_thread = None
+    try:
+        assert first_fetch_started.wait(2)
+        references["value"] = "ref:new"
+        reset_thread = threading.Thread(target=reset_home, name="reset-secret-cache")
+        reset_thread.start()
+        assert reset_lock_attempted.wait(2)
+        reset_was_serialized = not reset_finished.wait(0.1)
+    finally:
+        release_first_fetch.set()
+        fetch_thread.join(2)
+        if reset_thread is not None:
+            reset_thread.join(2)
+
+    assert not fetch_thread.is_alive()
+    assert reset_thread is None or not reset_thread.is_alive()
+    assert reset_was_serialized
+    assert failures == []
+    assert results[0]["OPENROUTER_API_KEY"] == "ref:old"
+
+    assert env_loader.hydrate_profile_secret_sources(home)["OPENROUTER_API_KEY"] == "ref:new"
+    assert apply_calls == ["ref:old", "ref:new"]
 
 
 @pytest.mark.parametrize("replaced_by_other_owner", [False, True], ids=["revoked", "other-owner-kept"])

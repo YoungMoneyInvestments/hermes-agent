@@ -151,7 +151,7 @@ class GatewayProfileReconcileMixin:
                 # sibling profile snapshots intact.
                 if name in changed:
                     from hermes_cli.env_loader import reset_secret_source_cache
-                    reset_secret_source_cache(current[name])
+                    await asyncio.to_thread(reset_secret_source_cache, current[name])
                 connected = await self._start_one_profile_adapters(name, current[name], claimed)
             except MultiplexConfigError as exc:
                 logger.error("[MULTIPLEX] Profile '%s' not served: %s", name, exc)
@@ -269,7 +269,7 @@ class GatewayProfileReconcileMixin:
             # Do this after teardown so hooks can still read the old profile scope. Reset is
             # local-only: it neither fetches secrets nor mutates process environment/siblings.
             from hermes_cli.env_loader import reset_secret_source_cache
-            reset_secret_source_cache(home)
+            await asyncio.to_thread(reset_secret_source_cache, home)
 
 
 def _profile_lifecycle_verb(runner, *, serve: bool):
