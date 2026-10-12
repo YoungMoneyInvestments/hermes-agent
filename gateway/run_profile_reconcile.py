@@ -145,13 +145,12 @@ class GatewayProfileReconcileMixin:
             # a setup save during an awaited handshake needs another scan.
             scan_signature = profile_serve_signature(current[name])
             try:
-                # Hydration is cached per home. A changed config/.env can point at a new
+                # Hydration is cached per home. An added or changed profile can point at a new
                 # external secret reference, so discard only this profile's snapshot before
                 # _start_one_profile_adapters re-hydrates it. The helper deliberately leaves
                 # sibling profile snapshots intact.
-                if name in changed:
-                    from hermes_cli.env_loader import reset_secret_source_cache
-                    await asyncio.to_thread(reset_secret_source_cache, current[name])
+                from hermes_cli.env_loader import reset_secret_source_cache
+                await asyncio.to_thread(reset_secret_source_cache, current[name])
                 connected = await self._start_one_profile_adapters(name, current[name], claimed)
             except MultiplexConfigError as exc:
                 logger.error("[MULTIPLEX] Profile '%s' not served: %s", name, exc)

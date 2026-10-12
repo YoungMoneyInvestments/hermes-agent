@@ -265,7 +265,8 @@ async def test_deleted_profile_is_torn_down_and_unrouted_others_untouched(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_profile_reconfigure_rehydrates_only_changed_secret_source_snapshot(tmp_path, monkeypatch):
+@pytest.mark.parametrize("already_served", [True, False])
+async def test_profile_reconfigure_rehydrates_only_changed_secret_source_snapshot(tmp_path, monkeypatch, already_served):
     """A changed external-source reference is re-resolved on hot reconfigure without clearing
     another profile's cached source snapshot."""
     from agent.secret_sources.base import FetchResult
@@ -305,10 +306,11 @@ async def test_profile_reconfigure_rehydrates_only_changed_secret_source_snapsho
     assert env_loader.hydrate_profile_secret_sources(alpha)["OPENROUTER_API_KEY"] == "ref:alpha-old"
     assert env_loader.hydrate_profile_secret_sources(beta)["OPENROUTER_API_KEY"] == "ref:beta-stable"
 
-    runner._served_profile_homes = {"alpha": alpha, "beta": beta}
-    runner._served_profile_signatures = {
-        "alpha": profile_serve_signature(alpha), "beta": profile_serve_signature(beta),
-    }
+    runner._served_profile_homes = {"beta": beta}
+    runner._served_profile_signatures = {"beta": profile_serve_signature(beta)}
+    if already_served:
+        runner._served_profile_homes["alpha"] = alpha
+        runner._served_profile_signatures["alpha"] = profile_serve_signature(alpha)
     runner._record_served_profiles = lambda _active, profile_homes: runner._note_served_profiles(profile_homes)
     resolved = {}
 
@@ -325,7 +327,7 @@ async def test_profile_reconfigure_rehydrates_only_changed_secret_source_snapsho
 
     result = await runner.reconcile_served_profiles()
 
-    assert result["rescanned"] == ["alpha"]
+    assert result["rescanned" if already_served else "added"] == ["alpha"]
     assert resolved["alpha"]["OPENROUTER_API_KEY"] == "ref:alpha-new"
     assert env_loader.get_secret_source_values(beta)["OPENROUTER_API_KEY"] == "ref:beta-stable"
     assert applied_homes == [alpha_key, beta_key, alpha_key]

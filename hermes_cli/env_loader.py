@@ -239,8 +239,8 @@ def reset_secret_source_cache(hermes_home: str | os.PathLike | None = None) -> N
     ``hermes_home`` limits the reset to ONE home: a multiplex gateway keeps every profile's snapshot in
     this process, and a per-fire cron re-pull or a plugin-discovery refresh for one home must not wipe
     a sibling's hydrated snapshot — the sibling's next scope build would run empty until it re-hydrated
-    (#102041). Sharing the hydration lock prevents an in-flight fetch from publishing stale data after
-    its home is reset."""
+    (#102041). Sharing the hydration lock prevents a routed hydration from publishing stale data after
+    its home is reset. The launch-home external-source writer is outside this routed contract."""
     with _SECRET_SOURCE_CACHE_LOCK:
         if hermes_home is None:
             _APPLIED_HOMES.clear()
