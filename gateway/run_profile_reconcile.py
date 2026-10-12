@@ -145,6 +145,13 @@ class GatewayProfileReconcileMixin:
             # a setup save during an awaited handshake needs another scan.
             scan_signature = profile_serve_signature(current[name])
             try:
+                # Hydration is cached per home. A changed config/.env can point at a new
+                # external secret reference, so discard only this profile's snapshot before
+                # _start_one_profile_adapters re-hydrates it. The helper deliberately leaves
+                # sibling profile snapshots intact.
+                if name in changed:
+                    from hermes_cli.env_loader import reset_secret_source_cache
+                    reset_secret_source_cache(current[name])
                 connected = await self._start_one_profile_adapters(name, current[name], claimed)
             except MultiplexConfigError as exc:
                 logger.error("[MULTIPLEX] Profile '%s' not served: %s", name, exc)
@@ -229,34 +236,40 @@ class GatewayProfileReconcileMixin:
             task.cancel()
         if tasks:
             await asyncio.wait(tasks, timeout=self._adapter_disconnect_timeout_secs())
-        with _profile_runtime_scope(Path(home), hydrate_secrets=False):
-            adapters = (getattr(self, "_profile_adapters", None) or {}).pop(name, None) or {}
-            for platform, adapter in list(adapters.items()):
-                await self._bounded_adapter_teardown(adapter, platform, profile=name)
-            # Its ``<name>:<platform>`` runtime entries describe a profile that no longer exists.
-            _write_runtime_status_quiet(drop_profile_platforms=name)
-            for attr in ("pairing_stores", "_busy_text_modes_by_profile", "_busy_input_modes_by_profile",
-                         "_busy_text_timing_by_profile", "_human_delay_by_profile", "_profile_configs"):
-                store = getattr(self, attr, None)
-                if isinstance(store, dict):
-                    store.pop(name, None)
-            if isinstance(self._served_profile_homes, dict):
-                self._served_profile_homes.pop(name, None)
-            if isinstance(self._served_profile_signatures, dict):
-                self._served_profile_signatures.pop(name, None)
-            from gateway.session import _session_key_namespace
-            prefix = _session_key_namespace(name) + ":"
-            cache = getattr(self, "_agent_cache", None)
-            for key in [k for k in list(cache or {}) if str(k).startswith(prefix)]:
-                with _log_suppressed(logging.DEBUG, "agent eviction failed for %s", key, exc_info=True):
-                    self._evict_cached_agent(key)
-            with _log_suppressed(logging.DEBUG, "profile handle release failed", exc_info=True):
-                from hermes_state_registry import close_all_under
-                close_all_under(home)
-            with _log_suppressed(logging.DEBUG, "memory-store release failed", exc_info=True):
-                from plugins.memory.holographic.store import MemoryStore
-                MemoryStore.release_all_under(home)
-            logger.info("[MULTIPLEX] Profile '%s' unserved — %d adapter(s) stopped and unrouted", name, len(adapters))
+        try:
+            with _profile_runtime_scope(Path(home), hydrate_secrets=False):
+                adapters = (getattr(self, "_profile_adapters", None) or {}).pop(name, None) or {}
+                for platform, adapter in list(adapters.items()):
+                    await self._bounded_adapter_teardown(adapter, platform, profile=name)
+                # Its ``<name>:<platform>`` runtime entries describe a profile that no longer exists.
+                _write_runtime_status_quiet(drop_profile_platforms=name)
+                for attr in ("pairing_stores", "_busy_text_modes_by_profile", "_busy_input_modes_by_profile",
+                             "_busy_text_timing_by_profile", "_human_delay_by_profile", "_profile_configs"):
+                    store = getattr(self, attr, None)
+                    if isinstance(store, dict):
+                        store.pop(name, None)
+                if isinstance(self._served_profile_homes, dict):
+                    self._served_profile_homes.pop(name, None)
+                if isinstance(self._served_profile_signatures, dict):
+                    self._served_profile_signatures.pop(name, None)
+                from gateway.session import _session_key_namespace
+                prefix = _session_key_namespace(name) + ":"
+                cache = getattr(self, "_agent_cache", None)
+                for key in [k for k in list(cache or {}) if str(k).startswith(prefix)]:
+                    with _log_suppressed(logging.DEBUG, "agent eviction failed for %s", key, exc_info=True):
+                        self._evict_cached_agent(key)
+                with _log_suppressed(logging.DEBUG, "profile handle release failed", exc_info=True):
+                    from hermes_state_registry import close_all_under
+                    close_all_under(home)
+                with _log_suppressed(logging.DEBUG, "memory-store release failed", exc_info=True):
+                    from plugins.memory.holographic.store import MemoryStore
+                    MemoryStore.release_all_under(home)
+                logger.info("[MULTIPLEX] Profile '%s' unserved — %d adapter(s) stopped and unrouted", name, len(adapters))
+        finally:
+            # Do this after teardown so hooks can still read the old profile scope. Reset is
+            # local-only: it neither fetches secrets nor mutates process environment/siblings.
+            from hermes_cli.env_loader import reset_secret_source_cache
+            reset_secret_source_cache(home)
 
 
 def _profile_lifecycle_verb(runner, *, serve: bool):

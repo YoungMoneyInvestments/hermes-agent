@@ -223,9 +223,18 @@ async def test_created_then_credentialed_profile_is_served_without_restart(tmp_p
 
 @pytest.mark.asyncio
 async def test_deleted_profile_is_torn_down_and_unrouted_others_untouched(tmp_path, monkeypatch):
+    from hermes_cli import env_loader
+
     runner, home = _runner(tmp_path, monkeypatch)
-    _mkprofile(home, "alpha", "DISCORD_BOT_TOKEN=alpha-token\n")
+    alpha_dir = _mkprofile(home, "alpha", "DISCORD_BOT_TOKEN=alpha-token\n")
     gamma_dir = _mkprofile(home, "gamma", "DISCORD_BOT_TOKEN=gamma-token\n")
+    alpha_key = str(alpha_dir.resolve())
+    gamma_key = str(gamma_dir.resolve())
+    monkeypatch.setattr(env_loader, "_APPLIED_HOMES", {alpha_key, gamma_key})
+    monkeypatch.setattr(env_loader, "_SECRET_SOURCE_VALUES_BY_HOME", {
+        alpha_key: {"ALPHA_REFERENCE": "ref:alpha"},
+        gamma_key: {"GAMMA_REFERENCE": "ref:gamma"},
+    })
     with patch("hermes_cli.profiles.get_active_profile_name", return_value="default"):
         await runner._start_secondary_profile_adapters()
         alpha_adapter = runner._profile_adapters["alpha"][Platform.DISCORD]
@@ -249,6 +258,77 @@ async def test_deleted_profile_is_torn_down_and_unrouted_others_untouched(tmp_pa
     assert _served_record(home) == ["default", "alpha"]
     assert runner._profile_adapters["alpha"][Platform.DISCORD] is alpha_adapter
     assert alpha_adapter.disconnected is False
+    assert gamma_key not in env_loader._APPLIED_HOMES
+    assert gamma_key not in env_loader._SECRET_SOURCE_VALUES_BY_HOME
+    assert env_loader._APPLIED_HOMES == {alpha_key}
+    assert env_loader.get_secret_source_values(alpha_dir) == {"ALPHA_REFERENCE": "ref:alpha"}
+
+
+@pytest.mark.asyncio
+async def test_profile_reconfigure_rehydrates_only_changed_secret_source_snapshot(tmp_path, monkeypatch):
+    """A changed external-source reference is re-resolved on hot reconfigure without clearing
+    another profile's cached source snapshot."""
+    from agent.secret_sources.base import FetchResult
+    from agent.secret_sources.registry import AppliedVar, ApplyReport, SourceReport
+    from agent.secret_sources import registry
+    from hermes_cli import env_loader
+
+    runner, home = _runner(tmp_path, monkeypatch)
+    alpha = _mkprofile(home, "alpha")
+    beta = _mkprofile(home, "beta")
+    alpha_key = str(alpha.resolve())
+    beta_key = str(beta.resolve())
+    (alpha / "config.yaml").write_text(
+        "secrets:\n  command:\n    reference: ref:alpha-old\n", encoding="utf-8",
+    )
+    (beta / "config.yaml").write_text(
+        "secrets:\n  command:\n    reference: ref:beta-stable\n", encoding="utf-8",
+    )
+    applied_homes = []
+    monkeypatch.setattr(env_loader, "_APPLIED_HOMES", set())
+    monkeypatch.setattr(env_loader, "_SECRET_SOURCE_VALUES_BY_HOME", {})
+    monkeypatch.setattr(env_loader, "_SECRET_SOURCE_RESTORE_BY_HOME", {})
+
+    def apply_reference(cfg, profile_home, *, environ):
+        applied_homes.append(str(profile_home.resolve()))
+        value = cfg["command"]["reference"]
+        environ["OPENROUTER_API_KEY"] = value
+        return ApplyReport(
+            sources=[SourceReport(name="command", label="command", result=FetchResult(),
+                                  applied=["OPENROUTER_API_KEY"])],
+            provenance={"OPENROUTER_API_KEY": AppliedVar(
+                name="OPENROUTER_API_KEY", source="command", shape="mapped", overrode_env=False,
+            )},
+        )
+
+    monkeypatch.setattr(registry, "apply_all", apply_reference)
+    assert env_loader.hydrate_profile_secret_sources(alpha)["OPENROUTER_API_KEY"] == "ref:alpha-old"
+    assert env_loader.hydrate_profile_secret_sources(beta)["OPENROUTER_API_KEY"] == "ref:beta-stable"
+
+    runner._served_profile_homes = {"alpha": alpha, "beta": beta}
+    runner._served_profile_signatures = {
+        "alpha": profile_serve_signature(alpha), "beta": profile_serve_signature(beta),
+    }
+    runner._record_served_profiles = lambda _active, profile_homes: runner._note_served_profiles(profile_homes)
+    resolved = {}
+
+    async def start_profile(name, profile_home, _claimed):
+        resolved[name] = env_loader.hydrate_profile_secret_sources(profile_home)
+        return 0
+
+    runner._start_one_profile_adapters = start_profile
+    monkeypatch.setattr("gateway.run._multiplex_profile_homes", lambda _config: [("alpha", alpha), ("beta", beta)])
+    monkeypatch.setattr("gateway.status.live_gateway_pid_for_home", lambda _profile_home: None)
+    (alpha / "config.yaml").write_text(
+        "secrets:\n  command:\n    reference: ref:alpha-new\n", encoding="utf-8",
+    )
+
+    result = await runner.reconcile_served_profiles()
+
+    assert result["rescanned"] == ["alpha"]
+    assert resolved["alpha"]["OPENROUTER_API_KEY"] == "ref:alpha-new"
+    assert env_loader.get_secret_source_values(beta)["OPENROUTER_API_KEY"] == "ref:beta-stable"
+    assert applied_homes == [alpha_key, beta_key, alpha_key]
 
 
 @pytest.mark.asyncio
