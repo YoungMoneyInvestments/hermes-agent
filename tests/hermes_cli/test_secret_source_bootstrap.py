@@ -275,7 +275,7 @@ def _write_plugin_home(home: Path, *, plugin_enabled: bool) -> None:
         f"plugins:\n  enabled: {enabled}\nsecrets:\n  fixturevault:\n    enabled: true\n", encoding="utf-8")
 
 
-def test_profile_secret_cache_reset_waits_for_inflight_fetch(monkeypatch, tmp_path):
+def test_profile_secret_cache_reset_discards_inflight_fetch_without_waiting(monkeypatch, tmp_path):
     """Reset must serialize with hydration, so an older blocked fetch cannot republish a stale
     profile snapshot after invalidation."""
     from agent.secret_sources import registry
@@ -287,7 +287,7 @@ def test_profile_secret_cache_reset_waits_for_inflight_fetch(monkeypatch, tmp_pa
     references = {"value": "ref:old"}
     first_fetch_started = threading.Event()
     release_first_fetch = threading.Event()
-    reset_lock_attempted = threading.Event()
+    reset_started = threading.Event()
     reset_finished = threading.Event()
     apply_calls = []
     results = []
@@ -297,19 +297,8 @@ def test_profile_secret_cache_reset_waits_for_inflight_fetch(monkeypatch, tmp_pa
     monkeypatch.setattr(env_loader, "_SOURCE_SUPPLIED_NAMES", set())
     monkeypatch.setattr(env_loader, "_SECRET_SOURCE_VALUES_BY_HOME", {})
     monkeypatch.setattr(env_loader, "_SECRET_SOURCE_RESTORE_BY_HOME", {})
-    source_cache_lock = env_loader._SECRET_SOURCE_CACHE_LOCK
-
-    class ObservedLock:
-        def __enter__(self):
-            if threading.current_thread().name == "reset-secret-cache":
-                reset_lock_attempted.set()
-            source_cache_lock.acquire()
-            return self
-
-        def __exit__(self, *_exc):
-            source_cache_lock.release()
-
-    monkeypatch.setattr(env_loader, "_SECRET_SOURCE_CACHE_LOCK", ObservedLock())
+    monkeypatch.setattr(env_loader, "_SECRET_SOURCE_CACHE_HOME_GENERATIONS", {})
+    monkeypatch.setattr(env_loader, "_SECRET_SOURCE_CACHE_GENERATION", 0)
     monkeypatch.setattr(env_loader, "_load_secrets_config", lambda _home: {
         "command": {"reference": references["value"]},
     })
@@ -339,6 +328,7 @@ def test_profile_secret_cache_reset_waits_for_inflight_fetch(monkeypatch, tmp_pa
             failures.append(exc)
 
     def reset_home():
+        reset_started.set()
         env_loader.reset_secret_source_cache(home)
         reset_finished.set()
 
@@ -348,10 +338,10 @@ def test_profile_secret_cache_reset_waits_for_inflight_fetch(monkeypatch, tmp_pa
     try:
         assert first_fetch_started.wait(2)
         references["value"] = "ref:new"
-        reset_thread = threading.Thread(target=reset_home, name="reset-secret-cache")
+        reset_thread = threading.Thread(target=reset_home)
         reset_thread.start()
-        assert reset_lock_attempted.wait(2)
-        reset_was_serialized = not reset_finished.wait(0.1)
+        assert reset_started.wait(2)
+        reset_returns_before_fetch = reset_finished.wait(2)
     finally:
         release_first_fetch.set()
         fetch_thread.join(2)
@@ -360,11 +350,11 @@ def test_profile_secret_cache_reset_waits_for_inflight_fetch(monkeypatch, tmp_pa
 
     assert not fetch_thread.is_alive()
     assert reset_thread is None or not reset_thread.is_alive()
-    assert reset_was_serialized
+    assert reset_returns_before_fetch
     assert failures == []
-    assert results[0]["OPENROUTER_API_KEY"] == "ref:old"
-
-    assert env_loader.hydrate_profile_secret_sources(home)["OPENROUTER_API_KEY"] == "ref:new"
+    assert release_first_fetch.is_set()
+    assert results[0]["OPENROUTER_API_KEY"] == "ref:new"
+    assert env_loader.get_secret_source_values(home)["OPENROUTER_API_KEY"] == "ref:new"
     assert apply_calls == ["ref:old", "ref:new"]
 
 

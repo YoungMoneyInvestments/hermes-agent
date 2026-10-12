@@ -63,6 +63,11 @@ _SECRET_SOURCE_WRITES_BY_HOME: dict[str, dict[str, tuple[str, str, str | None]]]
 # re-parse + ASCII sweep re-run each time (Bitwarden's own cache only saves the network call).
 _APPLIED_HOMES: set[str] = set()
 _SECRET_SOURCE_CACHE_LOCK = threading.RLock()
+# Cache metadata has its own short lock: invalidation must not wait behind an external fetch holding
+# _SECRET_SOURCE_CACHE_LOCK. Generation changes make that fetch discard its result before publish.
+_SECRET_SOURCE_CACHE_STATE_LOCK = threading.RLock()
+_SECRET_SOURCE_CACHE_GENERATION = 0
+_SECRET_SOURCE_CACHE_HOME_GENERATIONS: dict[str, int] = {}
 
 # What THIS process has published from dotenv files, per variable: (value before our first publish, or
 # None if absent; last value we published; load pass that published it). Reloads run per gateway turn and
@@ -161,7 +166,8 @@ def managed_dotenv_keys() -> frozenset[str]:
 
 def get_secret_source_values(hermes_home: str | os.PathLike) -> dict[str, str]:
     """Return the external-secret value snapshot for ``hermes_home``."""
-    return dict(_SECRET_SOURCE_VALUES_BY_HOME.get(str(Path(hermes_home).resolve()), {}))
+    with _SECRET_SOURCE_CACHE_STATE_LOCK:
+        return dict(_SECRET_SOURCE_VALUES_BY_HOME.get(str(Path(hermes_home).resolve()), {}))
 
 
 def hydrate_profile_secret_sources(hermes_home: str | os.PathLike) -> dict[str, str]:
@@ -170,25 +176,40 @@ def hydrate_profile_secret_sources(hermes_home: str | os.PathLike) -> dict[str, 
     seeded from that ``.env`` and record the per-home snapshot for ``build_profile_secret_scope()``.
     Fail-open / once-per-home like ``_apply_external_secret_sources``; never returns plaintext .env entries."""
     with _SECRET_SOURCE_CACHE_LOCK:
-        return _hydrate_profile_secret_sources(Path(hermes_home))
+        while True:
+            values = _hydrate_profile_secret_sources(Path(hermes_home))
+            if values is not None:
+                return values
 
 
-def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
-    """Locked implementation for :func:`hydrate_profile_secret_sources`."""
+def _hydrate_profile_secret_sources(home: Path) -> dict[str, str] | None:
+    """Resolve once; return ``None`` when reset invalidated the attempt so its caller retries."""
     home_key = str(home.resolve())
-    if home_key in _APPLIED_HOMES:
-        return get_secret_source_values(home)
+    with _SECRET_SOURCE_CACHE_STATE_LOCK:
+        generation = (_SECRET_SOURCE_CACHE_GENERATION, _SECRET_SOURCE_CACHE_HOME_GENERATIONS.get(home_key, 0))
+        if home_key in _APPLIED_HOMES:
+            return dict(_SECRET_SOURCE_VALUES_BY_HOME.get(home_key, {}))
 
-    # A retry must not keep serving a partial result after the source is removed, disabled, or can no
-    # longer be evaluated. Publish only the snapshot established by this attempt.
-    _SECRET_SOURCE_VALUES_BY_HOME.pop(home_key, None)
-    _SECRET_SOURCE_RESTORE_BY_HOME.pop(home_key, None)
+        # A retry must not keep serving a partial result after the source is removed, disabled, or can no
+        # longer be evaluated. Publish only the snapshot established by this attempt.
+        _SECRET_SOURCE_VALUES_BY_HOME.pop(home_key, None)
+        _SECRET_SOURCE_RESTORE_BY_HOME.pop(home_key, None)
+
+    def was_invalidated() -> bool:
+        with _SECRET_SOURCE_CACHE_STATE_LOCK:
+            return generation != (
+                _SECRET_SOURCE_CACHE_GENERATION, _SECRET_SOURCE_CACHE_HOME_GENERATIONS.get(home_key, 0),
+            )
 
     try:
         cfg = _load_secrets_config(home)
     except Exception:  # noqa: BLE001 — external sources must not block routing
+        if was_invalidated():
+            return None
         return {}
     if not cfg:
+        if was_invalidated():
+            return None
         return {}
 
     try:
@@ -208,28 +229,47 @@ def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
         local_env["HERMES_HOME"] = str(home)
         report = apply_all(cfg, home, environ=local_env)
     except Exception:  # noqa: BLE001 — preserve fail-open startup behavior
+        if was_invalidated():
+            return None
         return {}
 
     if not report.sources:
+        if was_invalidated():
+            return None
         return {}
 
-    # Routed profiles have no runtime reset path. Keep a failed source retryable so correcting its
-    # profile-local bootstrap credentials takes effect on the next turn; successful sources from a
-    # mixed report are still snapshotted below and can be used while the failed source recovers.
-    if all(src.result.ok for src in report.sources):
-        _APPLIED_HOMES.add(home_key)
-    # Same ownership bookkeeping as the process-global path: a name this profile's source supplied — applied,
-    # or skipped because the private mapping already had it — is a source-owned name the routed-child scrub
-    # must know about, or a sibling still inherits the launch value for it (review on f5f88d5058).
-    _record_supplied_names(report)
     values: dict[str, str] = {}
     for name, applied in report.provenance.items():
         value = local_env.get(name)
         if value is None:
             continue
-        _SECRET_SOURCES[name] = applied.source
         values[name] = value
-    _SECRET_SOURCE_VALUES_BY_HOME[home_key] = values
+
+    # Publish only if this fetch still belongs to the current home generation. Reset does not wait for
+    # this fetch; an obsolete result is discarded and resolved again against the new configuration.
+    with _SECRET_SOURCE_CACHE_STATE_LOCK:
+        current_generation = (
+            _SECRET_SOURCE_CACHE_GENERATION, _SECRET_SOURCE_CACHE_HOME_GENERATIONS.get(home_key, 0),
+        )
+        if generation != current_generation:
+            invalidated = True
+        else:
+            invalidated = False
+            # Routed profiles have no runtime reset path. Keep a failed source retryable so correcting its
+            # profile-local bootstrap credentials takes effect on the next turn; successful sources from a
+            # mixed report are still snapshotted below and can be used while the failed source recovers.
+            if all(src.result.ok for src in report.sources):
+                _APPLIED_HOMES.add(home_key)
+            # Same ownership bookkeeping as the process-global path: a name this profile's source supplied — applied,
+            # or skipped because the private mapping already had it — is a source-owned name the routed-child scrub
+            # must know about, or a sibling still inherits the launch value for it (review on f5f88d5058).
+            _record_supplied_names(report)
+            for name, applied in report.provenance.items():
+                if name in values:
+                    _SECRET_SOURCES[name] = applied.source
+            _SECRET_SOURCE_VALUES_BY_HOME[home_key] = values
+    if invalidated:
+        return None
     return dict(values)
 
 
@@ -239,10 +279,14 @@ def reset_secret_source_cache(hermes_home: str | os.PathLike | None = None) -> N
     ``hermes_home`` limits the reset to ONE home: a multiplex gateway keeps every profile's snapshot in
     this process, and a per-fire cron re-pull or a plugin-discovery refresh for one home must not wipe
     a sibling's hydrated snapshot — the sibling's next scope build would run empty until it re-hydrated
-    (#102041). Sharing the hydration lock prevents a routed hydration from publishing stale data after
-    its home is reset. The launch-home external-source writer is outside this routed contract."""
-    with _SECRET_SOURCE_CACHE_LOCK:
+    (#102041). A generation change prevents an in-flight routed fetch from publishing stale data without
+    making reset wait behind the external source. The launch-home external-source writer is outside this
+    routed contract."""
+    global _SECRET_SOURCE_CACHE_GENERATION
+    with _SECRET_SOURCE_CACHE_STATE_LOCK:
         if hermes_home is None:
+            _SECRET_SOURCE_CACHE_GENERATION += 1
+            _SECRET_SOURCE_CACHE_HOME_GENERATIONS.clear()
             _APPLIED_HOMES.clear()
             _SECRET_SOURCES.clear()
             _SOURCE_SUPPLIED_NAMES.clear()
@@ -251,6 +295,9 @@ def reset_secret_source_cache(hermes_home: str | os.PathLike | None = None) -> N
             _SECRET_SOURCE_WRITES_BY_HOME.clear()
             return
         home_key = str(Path(hermes_home).resolve())
+        _SECRET_SOURCE_CACHE_HOME_GENERATIONS[home_key] = (
+            _SECRET_SOURCE_CACHE_HOME_GENERATIONS.get(home_key, 0) + 1
+        )
         _APPLIED_HOMES.discard(home_key)
         _SECRET_SOURCE_VALUES_BY_HOME.pop(home_key, None)
         _SECRET_SOURCE_RESTORE_BY_HOME.pop(home_key, None)
