@@ -37,3 +37,63 @@ def test_query_and_query_file_mutually_exclusive(tmp_path):
     with pytest.raises(SystemExit) as exc:
         _parse(["chat", "-q", "x", "--query-file", str(f)])
     assert exc.value.code == 2
+
+
+def test_invalid_non_tui_query_file_refused_before_bootstrap(monkeypatch, tmp_path):
+    import io
+    import pytest
+    from hermes_cli import _early_recovery
+    monkeypatch.setattr(_early_recovery, "restore_interrupted_pull", lambda: False)
+    import hermes_cli.main as entry
+
+    for name in ("_apply_safe_mode", "_apply_user_config_bypass", "_guard_noninteractive_user_config",
+                 "_resolve_chat_session_args"):
+        monkeypatch.setattr(entry, name, lambda *_args: None)
+    monkeypatch.setattr(entry, "_warn_retired_xai_models", lambda: None)
+    monkeypatch.setattr("hermes_cli.free_tier_bootstrap.run_bootstrap",
+                        lambda **_kwargs: pytest.fail("invalid input reached bootstrap"))
+    for query_file, query in (("-", None), (str(tmp_path / "missing.txt"), None), ("-", "conflicting query")):
+        monkeypatch.setattr(sys, "stdin", io.StringIO("   "))
+        args = _parse(["chat", "--query-file", query_file, "--format", "stream-json"])
+        args.query = query
+        with pytest.raises(SystemExit) as error:
+            entry.cmd_chat(args)
+        assert error.value.code == 2
+    # Interactive TUI historically ignores query-file, so never consume its stdin.
+    stdin = io.StringIO("interactive input")
+    monkeypatch.setattr(stdin, "read", lambda: pytest.fail("TUI stdin consumed"))
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(entry, "_resolve_use_tui", lambda _args: True)
+    args = _parse(["chat", "--query-file", "-"])
+    def stop_bootstrap(**_kwargs):
+        assert args.query is None
+        raise RuntimeError("stop before TUI bootstrap")
+    monkeypatch.setattr("hermes_cli.free_tier_bootstrap.run_bootstrap", stop_bootstrap)
+    with pytest.raises(RuntimeError, match="stop before TUI bootstrap"):
+        entry.cmd_chat(args)
+
+
+def test_relative_query_file_uses_selected_workspace_before_bootstrap(monkeypatch, tmp_path):
+    import pytest
+    from hermes_cli import _early_recovery
+    monkeypatch.setattr(_early_recovery, "restore_interrupted_pull", lambda: False)
+    import hermes_cli.main as entry
+
+    original = tmp_path / "original"
+    selected = tmp_path / "selected"
+    original.mkdir()
+    selected.mkdir()
+    (original / "query.txt").write_text("original workspace prompt", encoding="utf-8")
+    (selected / "query.txt").write_text("selected workspace prompt", encoding="utf-8")
+    monkeypatch.chdir(original)
+    for name in ("_apply_safe_mode", "_apply_user_config_bypass", "_guard_noninteractive_user_config"):
+        monkeypatch.setattr(entry, name, lambda _args: None)
+    monkeypatch.setattr(entry, "_warn_retired_xai_models", lambda: None)
+    args = _parse(["chat", "--query-file", "query.txt", "--in", str(selected), "--format", "stream-json"])
+    def bootstrap(**_kwargs):
+        assert args.query == "selected workspace prompt"
+        assert Path.cwd() == selected
+        raise RuntimeError("stop before bootstrap side effects")
+    monkeypatch.setattr("hermes_cli.free_tier_bootstrap.run_bootstrap", bootstrap)
+    with pytest.raises(RuntimeError, match="stop before bootstrap side effects"):
+        entry.cmd_chat(args)
