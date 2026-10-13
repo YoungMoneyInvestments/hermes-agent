@@ -4431,10 +4431,15 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         if not deferred_response:
             return
         try:
-            if followup_msg:
-                # Native commands pass a catalog key; plugin callers may still pass literal text.
+            native_followup = any(
+                spec[4] == followup_msg for spec in _NATIVE_SLASH_COMMAND_SPECS if spec[4]
+            )
+            if followup_msg and not native_followup:
+                # Preserve the existing translation behavior for plugin-provided followups.
                 await interaction.edit_original_response(content=t(followup_msg))
             else:
+                # Dispatch starts background work; only its actual response proves completion.
+                # A catalog template must not announce a reset or other success on enqueue.
                 await interaction.delete_original_response()
         except Exception as e:
             logger.debug("Discord interaction cleanup failed: %s", e)
