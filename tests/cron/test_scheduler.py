@@ -2635,6 +2635,8 @@ def test_cron_explicit_reference_does_not_load_or_ingest_a_provider_pool():
         _construct_cron_agent(ctor, job, cfg, setup, workdir=None, session_id='fixture', session_db=None)
     assert setup.blocked is None
     assert ctor.call_args.kwargs['credential_pool'] is None
+    assert ctor.call_args.kwargs['api_key'] == runtime['api_key']
+    assert ctor.call_args.kwargs['provider'] == 'openrouter'
     load.assert_not_called()
 
 
@@ -2647,20 +2649,23 @@ def test_cron_keeps_the_exact_pool_selected_by_runtime_resolution(fallback):
     job = {"id": "selected-pool", "model": "gpt-6-luna", "provider": "openai-codex",
            "enabled_toolsets": ["cami_workshop_files", "no_mcp"]}
     selected_pool = MagicMock()
-    selected_pool.provider = "openai-codex"
+    selected_pool.provider = "custom" if fallback else "openai-codex"
     other_pool = MagicMock()
     other_pool.has_credentials.return_value = True
-    runtime = {"provider": "openai-codex", "api_key": "test-placeholder",
-               "credential_pool": selected_pool}
+    runtime = {"provider": "custom" if fallback else "openai-codex",
+               "requested_provider": "fixture-alias" if fallback else "openai-codex",
+               "api_key": "test-placeholder", "credential_pool": selected_pool}
     ctor = MagicMock()
     with patch('agent.credential_pool.load_pool', return_value=other_pool) as load, \
             patch('hermes_cli.runtime_provider.resolve_runtime_provider', side_effect=([AuthError('fixture auth refusal'), runtime] if fallback else [runtime])), \
-            patch('cron.scheduler._job_fallback_chain', return_value=([{'provider':'different-provider','model':'gpt-6-luna'}] if fallback else [])), \
-            patch('hermes_cli.fallback_config.effective_runtime_provider', return_value='different-provider'), \
+            patch('hermes_cli.fallback_config.resolve_entry_api_key', return_value=None), \
+            patch('cron.scheduler._job_fallback_chain', return_value=([{'provider':'fixture-alias','model':'gpt-6-luna','base_url':'https://fixture.example/v1'}] if fallback else [])), \
             patch('cron.scheduler._init_cron_mcp_tools'):
         setup = _resolve_cron_agent_setup(job, job['id'], 'fixture',
                  SimpleNamespace(cfg=cfg, model=job['model'], cron_default_provider='openai-codex'))
         _construct_cron_agent(ctor, job, cfg, setup, workdir=None, session_id='fixture', session_db=None)
     assert setup.blocked is None
-    assert ctor.call_args.kwargs['credential_pool'] is (None if fallback else selected_pool)
+    assert ctor.call_args.kwargs['credential_pool'] is selected_pool
+    if fallback:
+        assert setup.runtime['provider'] == 'fixture-alias'
     load.assert_not_called()
