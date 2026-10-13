@@ -1795,7 +1795,10 @@ def _resolve_job_runtime(job: dict, job_id: str, jc: _CronJobConfig) -> tuple[di
 def _load_credential_pool(runtime: dict, job_id: str):
     # Runtime resolution owns credential selection. Re-loading here can ingest a
     # scoped key into auth.json or replace the selected pool with another one.
-    return runtime.get("credential_pool")
+    pool = runtime.get("credential_pool")
+    logger.debug("Job %s: using resolved %s credentials; pooled=%s",
+                 job_id, runtime.get("provider"), pool is not None)
+    return pool
 
 
 def _init_cron_mcp_tools(job_id: str) -> None:
