@@ -8,6 +8,7 @@ envelope (exit code, final text, token stats). Diagnostics and ``session_id`` st
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 from typing import Any
@@ -34,10 +35,58 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+class _DiagnosticStream:
+    _protocol_diagnostics = True
+
+    def __init__(self, destination, protocol_stdout):
+        self._destination = destination
+        self._protocol_stdout = protocol_stdout
+
+    def write(self, text):
+        return self._destination.write(text)
+
+    def flush(self):
+        return self._destination.flush()
+
+    def isatty(self):
+        return self._destination.isatty()
+
+    def fileno(self):
+        return self._destination.fileno()
+
+    def close(self):
+        # stderr is borrowed from the process, never owned by this proxy.
+        self.flush()
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_destination"), name)
+
+
+def reserve_protocol_stdout():
+    """Reserve JSONL stdout for this one-shot process, including late exit callbacks."""
+    if isinstance(sys.stdout, _DiagnosticStream):
+        return sys.stdout._protocol_stdout
+    protocol_stdout = sys.stdout
+    # Imported libraries may already have a logging handler bound to stdout.
+    loggers = [logging.getLogger()] + [
+        logger for logger in list(logging.Logger.manager.loggerDict.values())
+        if isinstance(logger, logging.Logger)
+    ]
+    for logger in loggers:
+        for handler in list(logger.handlers):
+            if isinstance(handler, logging.StreamHandler) and handler.stream is protocol_stdout:
+                handler.setStream(sys.stderr)
+    sys.stdout = _DiagnosticStream(sys.stderr, protocol_stdout)
+    return protocol_stdout
+
+
 class StreamJsonEmitter:
     """Agent-callback sink that writes JSONL events to stdout and flushes each line."""
 
-    def __init__(self, model: str = "", session_id: str = ""):
+    def __init__(self, model: str = "", session_id: str = "", output=None):
+        if output is None and (sys.stdout is sys.stderr or getattr(sys.stdout, "_protocol_diagnostics", False)):
+            raise ValueError("Structured output requires an explicit protocol stream")
+        self._output = sys.stdout if output is None else output
         self._session_id = session_id
         self._start = time.time()
         self._tool_started: dict[str, float] = {}
@@ -97,7 +146,7 @@ class StreamJsonEmitter:
 
     def _emit(self, obj: dict) -> None:
         try:
-            sys.stdout.write(json.dumps({**obj, "timestamp": _now_ms()}, ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+            self._output.write(json.dumps({**obj, "timestamp": _now_ms()}, ensure_ascii=False) + "\n")
+            self._output.flush()
         except (BrokenPipeError, OSError):
             pass  # consumer closed the pipe — nothing left to report to

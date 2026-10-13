@@ -739,6 +739,10 @@ def _cprint(text: str):
     From a background thread while an Application runs, a direct print races the input
     redraw and gets buried, so those are painted on the app's loop via ``call_soon_threadsafe``.
     """
+    if getattr(sys.stdout, "_protocol_diagnostics", False):
+        # prompt_toolkit may hold a pre-reservation terminal output object.
+        print(text, file=sys.stderr)
+        return
     from cli import _PT_ANSI, _output_history_recording, _pt_print, _pt_print_ansi, _record_output_history
     recording = _output_history_recording()
     seq = next(_PAINT_SEQ)

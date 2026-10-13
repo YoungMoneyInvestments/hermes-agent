@@ -1752,13 +1752,16 @@ def main(
         if warning:
             print(_t("cli.startup.warning", warning=warning), file=sys.stderr)
 
-    _join_worktree = _start_worktree_setup(list_tools, list_toolsets, worktree, w)
     query = query or q
     # ``hermes chat`` already validated this; the direct Fire entry point gets the same contract.
     if output_format == "stream-json":
         if not query:
             raise ValueError("--format stream-json requires -q/--query")
         quiet = True
+    # Structured one-shot owns stdout until exit; diagnostics keep their real stderr metadata.
+    from hermes_cli.stream_json import reserve_protocol_stdout
+    protocol_stdout = reserve_protocol_stdout() if output_format == "stream-json" else None
+    _join_worktree = _start_worktree_setup(list_tools, list_toolsets, worktree, w)
     cli = _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget,
                                verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills)
 
@@ -1788,7 +1791,8 @@ def main(
     _install_single_query_signal_handlers(cli)
 
     if query or image:
-        _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json=output_format == "stream-json")
+        _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json=output_format == "stream-json",
+                               protocol_stdout=protocol_stdout)
         return
     cli.run()
 
