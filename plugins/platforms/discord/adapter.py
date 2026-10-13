@@ -409,6 +409,8 @@ def _needs_server_members_intent(
     or role allowlists needing cached member lookups. Explicit ``False`` uses the
     guild message's Member roles instead; missing roles still deny authorization.
     Username resolution always needs the cache. Message Content is always requested."""
+    if member_cache is not None and not isinstance(member_cache, bool):
+        logger.warning("Ignoring server_members_intent: expected a YAML boolean; member-cache default retained")
     entries = allowed_user_ids or ()
     if any(entry != "*" and not str(entry).isdigit() for entry in entries):
         return True
@@ -1303,6 +1305,8 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 self._allowed_user_ids, self._allowed_role_ids,
                 member_cache=self.config.extra.get("server_members_intent"),
             )
+            if self.config.extra.get("server_members_intent") is False and self._allowed_role_ids:
+                logger.info("[%s] Role authorization uses guild-message Member roles; cache-only voice/DM role checks deny without a member cache. Numeric user allowlists remain available.", self.name)
             intents.voice_states = True
             # Resolve proxy (DISCORD_PROXY > generic env vars > macOS system proxy)
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_bot
