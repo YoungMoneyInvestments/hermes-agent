@@ -2614,3 +2614,26 @@ class TestFailureStreakNudge:
         job = {"id": "old", "schedule": {"kind": "interval"}}  # pre-field job
         with patch("cron.scheduler.load_config", return_value={}):
             assert _failure_streak_nudge(job) == ""
+
+def test_cron_explicit_reference_does_not_load_or_ingest_a_provider_pool():
+    from cron.scheduler import _load_credential_pool
+    other_pool = MagicMock()
+    other_pool.has_credentials.return_value = True
+    with patch('agent.credential_pool.load_pool', return_value=other_pool) as load:
+        selected = _load_credential_pool({'provider': 'openrouter', 'source': 'env',
+                                         'api_key': 'test-placeholder',
+                                         'base_url': 'https://openrouter.ai/api/v1'}, 'explicit-reference')
+    assert selected is None
+    load.assert_not_called()
+
+
+def test_cron_keeps_the_exact_pool_selected_by_runtime_resolution():
+    from cron.scheduler import _load_credential_pool
+    selected_pool = MagicMock()
+    other_pool = MagicMock()
+    other_pool.has_credentials.return_value = True
+    with patch('agent.credential_pool.load_pool', return_value=other_pool) as load:
+        result = _load_credential_pool({'provider': 'openai-codex',
+                                       'credential_pool': selected_pool}, 'selected-pool')
+    assert result is selected_pool
+    load.assert_not_called()

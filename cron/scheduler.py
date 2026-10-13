@@ -1793,20 +1793,9 @@ def _resolve_job_runtime(job: dict, job_id: str, jc: _CronJobConfig) -> tuple[di
 
 
 def _load_credential_pool(runtime: dict, job_id: str):
-    runtime_provider = str(runtime.get("provider") or "").strip().lower()
-    if not runtime_provider:
-        return None
-    try:
-        from agent.credential_pool import load_pool
-        pool = load_pool(runtime_provider)
-        if pool.has_credentials():
-            logger.info(
-                "Job '%s': loaded credential pool for provider %s with %d entries",
-                job_id, runtime_provider, len(pool.entries()))
-            return pool
-    except Exception as e:
-        logger.debug("Job '%s': failed to load credential pool for %s: %s", job_id, runtime_provider, e)
-    return None
+    # Runtime resolution owns credential selection. Re-loading here can ingest a
+    # scoped key into auth.json or replace the selected pool with another one.
+    return runtime.get("credential_pool")
 
 
 def _init_cron_mcp_tools(job_id: str) -> None:
