@@ -75,7 +75,7 @@ def _ensure_discord_mock():
 
 _ensure_discord_mock()
 
-from plugins.platforms.discord.adapter import DiscordAdapter, _NATIVE_SLASH_COMMAND_SPECS  # noqa: E402
+from plugins.platforms.discord.adapter import DiscordAdapter  # noqa: E402
 
 
 class FakeTree:
@@ -170,8 +170,8 @@ async def test_run_simple_slash_executes_when_defer_interaction_expired(adapter)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("accepted, custom", [(False, False), (True, False), (True, True)])
-async def test_slash_enqueue_never_claims_native_command_completion(adapter, accepted, custom):
+@pytest.mark.parametrize("custom", [False, True])
+async def test_slash_enqueue_never_claims_native_command_completion(adapter, custom):
     interaction = SimpleNamespace(
         channel=_FakeTextChannel(channel_id=123, name="general"),
         channel_id=123, guild_id=456,
@@ -179,13 +179,13 @@ async def test_slash_enqueue_never_claims_native_command_completion(adapter, acc
         response=SimpleNamespace(defer=AsyncMock()),
         edit_original_response=AsyncMock(), delete_original_response=AsyncMock(),
     )
-    followup = "Custom plugin receipt" if custom else next(
-        spec[4] for spec in _NATIVE_SLASH_COMMAND_SPECS if spec[0] == "new"
-    )
-    async def enqueue(event):
-        event._gateway_accepted = accepted
-    adapter.handle_message = AsyncMock(side_effect=enqueue)
-    await adapter._run_simple_slash(interaction, "/reset", followup)
+    followup = "Custom plugin receipt"
+    adapter.handle_message = AsyncMock()
+    if custom:
+        await adapter._run_simple_slash(interaction, "/reset", followup)
+    else:
+        adapter._register_slash_commands()
+        await adapter._client.tree.commands["new"](interaction)
     adapter.handle_message.assert_awaited_once()
     if custom:
         interaction.edit_original_response.assert_awaited_once_with(content=followup)

@@ -4431,15 +4431,10 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         if not deferred_response:
             return
         try:
-            native_followup = any(
-                spec[4] == followup_msg for spec in _NATIVE_SLASH_COMMAND_SPECS if spec[4]
-            )
-            if followup_msg and not native_followup:
+            if followup_msg:
                 # Preserve the existing translation behavior for plugin-provided followups.
                 await interaction.edit_original_response(content=t(followup_msg))
             else:
-                # Dispatch starts background work; only its actual response proves completion.
-                # A catalog template must not announce a reset or other success on enqueue.
                 await interaction.delete_original_response()
         except Exception as e:
             logger.debug("Discord interaction cleanup failed: %s", e)
@@ -4491,7 +4486,9 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 self._register_thread_slash(tree, name, description)
                 continue
             tree.command(name=name, description=description)(
-                self._slash_proxy(name, args, template, followup, strip=name != "insights")
+                # Dispatch queues background work. Its actual reply establishes the outcome;
+                # the catalog's canned success text is not a completion receipt.
+                self._slash_proxy(name, args, template, None, strip=name != "insights")
             )
         # Auto-register COMMAND_REGISTRY + plugin commands not yet on the tree. Native
         # commands above always survive the 100-command cap; reserve one slot for /skill.
