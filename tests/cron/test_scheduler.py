@@ -2652,9 +2652,16 @@ def test_cron_keeps_the_exact_pool_selected_by_runtime_resolution(fallback):
     selected_pool.provider = "custom" if fallback else "openai-codex"
     other_pool = MagicMock()
     other_pool.has_credentials.return_value = True
-    runtime = {"provider": "custom" if fallback else "openai-codex",
-               "requested_provider": "fixture-alias" if fallback else "openai-codex",
-               "api_key": "test-placeholder", "credential_pool": selected_pool}
+    from hermes_cli.runtime_provider import _resolve_runtime_from_pool_entry
+    provider = "custom" if fallback else "openrouter"
+    selected_pool.provider = provider
+    entry = SimpleNamespace(runtime_api_key="test-placeholder",
+                            runtime_base_url="https://fixture.example/v1", source="pool")
+    runtime = _resolve_runtime_from_pool_entry(
+        provider=provider, entry=entry, requested_provider="fixture-alias" if fallback else provider,
+        model_cfg={"provider": provider}, pool=selected_pool, target_model=job['model'])
+    assert runtime['credential_pool'] is selected_pool
+
     ctor = MagicMock()
     with patch('agent.credential_pool.load_pool', return_value=other_pool) as load, \
             patch('hermes_cli.runtime_provider.resolve_runtime_provider', side_effect=([AuthError('fixture auth refusal'), runtime] if fallback else [runtime])), \
