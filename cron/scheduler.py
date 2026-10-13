@@ -1796,6 +1796,12 @@ def _load_credential_pool(runtime: dict, job_id: str):
     # Runtime resolution owns credential selection. Re-loading here can ingest a
     # scoped key into auth.json or replace the selected pool with another one.
     pool = runtime.get("credential_pool")
+    if pool is not None:
+        from agent.credential_pool import credential_pool_matches_provider
+        if not credential_pool_matches_provider(
+                pool, runtime.get("provider"), base_url=runtime.get("base_url")):
+            logger.debug("Job %s: resolved pool does not match final runtime provider", job_id)
+            return None
     logger.debug("Job %s: using resolved %s credentials; pooled=%s",
                  job_id, runtime.get("provider"), pool is not None)
     return pool
