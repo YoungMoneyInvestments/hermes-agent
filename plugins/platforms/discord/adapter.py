@@ -1305,8 +1305,8 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 self._allowed_user_ids, self._allowed_role_ids,
                 member_cache=self.config.extra.get("server_members_intent"),
             )
-            if self.config.extra.get("server_members_intent") is False and self._allowed_role_ids:
-                logger.info("[%s] Role authorization uses guild-message Member roles; cache-only voice/DM role checks deny without a member cache. Numeric user allowlists remain available.", self.name)
+            if not intents.members and self._allowed_role_ids:
+                logger.info("[%s] Role authorization uses guild-message Member roles; cache-only voice/DM role checks deny without a member cache, as may REST history backfill without Member roles. Numeric user allowlists remain available.", self.name)
             intents.voice_states = True
             # Resolve proxy (DISCORD_PROXY > generic env vars > macOS system proxy)
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_bot

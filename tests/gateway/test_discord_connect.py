@@ -680,8 +680,9 @@ class TestPrivilegedIntentsRequiredFatal:
         assert "expected a YAML boolean" in caplog.text
 
     @pytest.mark.asyncio
-    async def test_message_role_auth_without_privileged_member_cache(self, monkeypatch, caplog):
+    async def test_message_role_auth_without_privileged_member_cache(self, monkeypatch, caplog, tmp_path):
         caplog.set_level("INFO")
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
         adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token", extra={
             "slash_commands": False, "server_members_intent": False,
         }))
