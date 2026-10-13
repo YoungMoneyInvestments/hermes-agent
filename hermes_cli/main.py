@@ -1834,7 +1834,9 @@ def cmd_chat(args):
     use_tui = False if stream_json_requested(args) else _resolve_use_tui(args)
 
     _resolve_chat_session_args(args, use_tui)
-    _read_query_file(args)
+    if not use_tui:
+        # Reject non-TUI input before bootstrap; TUI historically ignores query-file.
+        _read_query_file(args)
 
     _warn_retired_xai_models()
 

@@ -39,7 +39,7 @@ def test_query_and_query_file_mutually_exclusive(tmp_path):
     assert exc.value.code == 2
 
 
-def test_invalid_query_file_refused_before_bootstrap(monkeypatch, tmp_path):
+def test_invalid_non_tui_query_file_refused_before_bootstrap(monkeypatch, tmp_path):
     import io
     import pytest
     from hermes_cli import _early_recovery
@@ -59,6 +59,18 @@ def test_invalid_query_file_refused_before_bootstrap(monkeypatch, tmp_path):
         with pytest.raises(SystemExit) as error:
             entry.cmd_chat(args)
         assert error.value.code == 2
+    # Interactive TUI historically ignores query-file, so never consume its stdin.
+    stdin = io.StringIO("interactive input")
+    monkeypatch.setattr(stdin, "read", lambda: pytest.fail("TUI stdin consumed"))
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(entry, "_resolve_use_tui", lambda _args: True)
+    args = _parse(["chat", "--query-file", "-"])
+    def stop_bootstrap(**_kwargs):
+        assert args.query is None
+        raise RuntimeError("stop before TUI bootstrap")
+    monkeypatch.setattr("hermes_cli.free_tier_bootstrap.run_bootstrap", stop_bootstrap)
+    with pytest.raises(RuntimeError, match="stop before TUI bootstrap"):
+        entry.cmd_chat(args)
 
 
 def test_relative_query_file_uses_selected_workspace_before_bootstrap(monkeypatch, tmp_path):
