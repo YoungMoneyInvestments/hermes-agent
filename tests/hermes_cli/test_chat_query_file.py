@@ -37,3 +37,25 @@ def test_query_and_query_file_mutually_exclusive(tmp_path):
     with pytest.raises(SystemExit) as exc:
         _parse(["chat", "-q", "x", "--query-file", str(f)])
     assert exc.value.code == 2
+
+
+def test_invalid_query_file_refused_before_bootstrap(monkeypatch, tmp_path):
+    import io
+    import pytest
+    from hermes_cli import _early_recovery
+    monkeypatch.setattr(_early_recovery, "restore_interrupted_pull", lambda: False)
+    import hermes_cli.main as entry
+
+    for name in ("_apply_safe_mode", "_apply_user_config_bypass", "_guard_noninteractive_user_config",
+                 "_resolve_chat_session_args"):
+        monkeypatch.setattr(entry, name, lambda *_args: None)
+    monkeypatch.setattr(entry, "_warn_retired_xai_models", lambda: None)
+    monkeypatch.setattr("hermes_cli.free_tier_bootstrap.run_bootstrap",
+                        lambda **_kwargs: pytest.fail("invalid input reached bootstrap"))
+    for query_file, query in (("-", None), (str(tmp_path / "missing.txt"), None), ("-", "conflicting query")):
+        monkeypatch.setattr(sys, "stdin", io.StringIO("   "))
+        args = _parse(["chat", "--query-file", query_file, "--format", "stream-json"])
+        args.query = query
+        with pytest.raises(SystemExit) as error:
+            entry.cmd_chat(args)
+        assert error.value.code == 2
