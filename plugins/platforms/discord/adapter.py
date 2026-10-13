@@ -4432,7 +4432,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             return
         try:
             if followup_msg:
-                # Native commands pass a catalog key; plugin callers may still pass literal text.
+                # Preserve the existing translation behavior for plugin-provided followups.
                 await interaction.edit_original_response(content=t(followup_msg))
             else:
                 await interaction.delete_original_response()
@@ -4486,7 +4486,9 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 self._register_thread_slash(tree, name, description)
                 continue
             tree.command(name=name, description=description)(
-                self._slash_proxy(name, args, template, followup, strip=name != "insights")
+                # Dispatch queues background work. Its actual reply establishes the outcome;
+                # the catalog's canned success text is not a completion receipt.
+                self._slash_proxy(name, args, template, None, strip=name != "insights")
             )
         # Auto-register COMMAND_REGISTRY + plugin commands not yet on the tree. Native
         # commands above always survive the 100-command cap; reserve one slot for /skill.

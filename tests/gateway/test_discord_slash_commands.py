@@ -169,6 +169,32 @@ async def test_run_simple_slash_executes_when_defer_interaction_expired(adapter)
     interaction.delete_original_response.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("custom", [False, True])
+async def test_slash_enqueue_never_claims_native_command_completion(adapter, custom):
+    interaction = SimpleNamespace(
+        channel=_FakeTextChannel(channel_id=123, name="general"),
+        channel_id=123, guild_id=456,
+        user=SimpleNamespace(id=42, name="Jezza", display_name="Jezza"),
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(), delete_original_response=AsyncMock(),
+    )
+    followup = "Custom plugin receipt"
+    adapter.handle_message = AsyncMock()
+    if custom:
+        await adapter._run_simple_slash(interaction, "/reset", followup)
+    else:
+        adapter._register_slash_commands()
+        await adapter._client.tree.commands["new"](interaction)
+    adapter.handle_message.assert_awaited_once()
+    if custom:
+        interaction.edit_original_response.assert_awaited_once_with(content=followup)
+        interaction.delete_original_response.assert_not_awaited()
+    else:
+        interaction.edit_original_response.assert_not_awaited()
+        interaction.delete_original_response.assert_awaited_once()
+
+
 # ------------------------------------------------------------------
 # Auto-registration from COMMAND_REGISTRY
 # ------------------------------------------------------------------
