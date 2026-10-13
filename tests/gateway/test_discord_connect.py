@@ -674,6 +674,37 @@ class TestPrivilegedIntentsRequiredFatal:
         assert needs({"769524422783664158"}, set()) is False
         assert needs({"alice"}, set()) is True
         assert needs(set(), {"111"}) is True
+        assert needs(set(), {"111"}, member_cache=False) is False
+        assert needs({"alice"}, {"111"}, member_cache=False) is True
+        assert needs(set(), {"111"}, member_cache="false") is True
+
+    @pytest.mark.asyncio
+    async def test_message_role_auth_without_privileged_member_cache(self, monkeypatch):
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token", extra={
+            "slash_commands": False, "server_members_intent": False,
+        }))
+        monkeypatch.setattr("gateway.status.acquire_scoped_lock", lambda *args, **kwargs: (True, None))
+        monkeypatch.setattr("gateway.status.release_scoped_lock", lambda *args, **kwargs: None)
+        monkeypatch.setattr(adapter, "_get_allowed_users", lambda: {"777"})
+        monkeypatch.setattr(adapter, "_get_allowed_roles", lambda: {111})
+        monkeypatch.setattr(adapter, "_resolve_allowed_usernames", AsyncMock())
+        intents = SimpleNamespace(message_content=False, dm_messages=False,
+            guild_messages=False, members=False, voice_states=False)
+        monkeypatch.setattr(discord_platform.Intents, "default", lambda: intents)
+        monkeypatch.setattr(discord_platform.commands, "Bot", lambda **kwargs: FakeBot(**kwargs))
+        try:
+            assert await adapter.connect() is True
+            assert adapter._client.intents.members is False
+            guild = SimpleNamespace(id=1, get_member=lambda _uid: None)
+            member = SimpleNamespace(guild=guild, roles=[SimpleNamespace(id=111)])
+            assert adapter._is_allowed_user("888", member, guild=guild) is True
+            assert adapter._is_allowed_user("888", None, guild=guild) is False
+            other_guild_member = SimpleNamespace(guild=SimpleNamespace(id=2), roles=member.roles)
+            assert adapter._is_allowed_user("888", other_guild_member, guild=guild) is False
+            assert adapter._is_allowed_user("888", member, is_dm=True) is False
+            assert adapter._is_allowed_user("777", is_dm=True) is True
+        finally:
+            await adapter.disconnect()
 
     @pytest.mark.asyncio
     async def test_connect_sets_non_retryable_fatal(self, monkeypatch):
