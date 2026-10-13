@@ -403,13 +403,18 @@ async def _wait_for_ready_or_bot_exit(
 
 def _needs_server_members_intent(
     allowed_user_ids: set[str] | list[str] | None, allowed_role_ids: set[str] | list[str] | None,
+    *, member_cache: bool | None = None,
 ) -> bool:
     """True when Server Members intent is needed: username allowlist entries (not IDs / ``*``)
-    or role allowlists needing member lookups. Message Content is always requested."""
+    or role allowlists needing cached member lookups. Explicit ``False`` uses the
+    guild message's Member roles instead; missing roles still deny authorization.
+    Username resolution always needs the cache. Message Content is always requested."""
+    if member_cache is not None and not isinstance(member_cache, bool):
+        logger.warning("Ignoring server_members_intent: expected a YAML boolean; member-cache default retained")
     entries = allowed_user_ids or ()
     if any(entry != "*" and not str(entry).isdigit() for entry in entries):
         return True
-    return bool(allowed_role_ids)
+    return bool(allowed_role_ids) and member_cache is not False
 
 
 def _format_privileged_intents_guidance(*, needs_members: bool) -> str:
@@ -1298,7 +1303,10 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             intents.guild_messages = True
             intents.members = _needs_server_members_intent(
                 self._allowed_user_ids, self._allowed_role_ids,
+                member_cache=self.config.extra.get("server_members_intent"),
             )
+            if not intents.members and self._allowed_role_ids:
+                logger.info("[%s] Role authorization uses guild-message Member roles; cache-only voice/DM role checks deny without a member cache, as may REST history backfill without Member roles. Numeric user allowlists remain available.", self.name)
             intents.voice_states = True
             # Resolve proxy (DISCORD_PROXY > generic env vars > macOS system proxy)
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_bot
@@ -1474,6 +1482,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 needs_members=_needs_server_members_intent(
                     getattr(self, "_allowed_user_ids", None),
                     getattr(self, "_allowed_role_ids", None),
+                    member_cache=self.config.extra.get("server_members_intent"),
                 )
             )
             return ("discord_intents_required", guidance, False)

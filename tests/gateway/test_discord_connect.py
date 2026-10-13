@@ -667,13 +667,52 @@ class TestPrivilegedIntentsRequiredFatal:
     """Missing Developer Portal intents must not spin reconnect forever."""
 
 
-    def test_needs_members_intent_rules(self):
+    def test_needs_members_intent_rules(self, caplog):
         needs = discord_platform._needs_server_members_intent
         assert needs(set(), set()) is False
         assert needs({"*"}, set()) is False
         assert needs({"769524422783664158"}, set()) is False
         assert needs({"alice"}, set()) is True
         assert needs(set(), {"111"}) is True
+        assert needs(set(), {"111"}, member_cache=False) is False
+        assert needs({"alice"}, {"111"}, member_cache=False) is True
+        assert needs(set(), {"111"}, member_cache="false") is True
+        assert "expected a YAML boolean" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_message_role_auth_without_privileged_member_cache(self, monkeypatch, caplog, tmp_path):
+        caplog.set_level("INFO")
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token", extra={
+            "slash_commands": False, "server_members_intent": False,
+        }))
+        monkeypatch.setattr("gateway.status.acquire_scoped_lock", lambda *args, **kwargs: (True, None))
+        monkeypatch.setattr("gateway.status.release_scoped_lock", lambda *args, **kwargs: None)
+        monkeypatch.setattr(adapter, "_get_allowed_users", lambda: {"777"})
+        monkeypatch.setattr(adapter, "_get_allowed_roles", lambda: {111})
+        monkeypatch.setattr(adapter, "_resolve_allowed_usernames", AsyncMock())
+        monkeypatch.setattr(discord_platform, "_read_dm_role_auth_guild", lambda: None)
+        intents = SimpleNamespace(message_content=False, dm_messages=False,
+            guild_messages=False, members=False, voice_states=False)
+        monkeypatch.setattr(discord_platform.Intents, "default", lambda: intents)
+        monkeypatch.setattr(discord_platform.commands, "Bot", lambda **kwargs: FakeBot(**kwargs))
+        try:
+            assert await adapter.connect() is True
+            assert adapter._client.intents.members is False
+            assert "cache-only voice/DM role checks deny" in caplog.text
+            guild = SimpleNamespace(id=1, get_member=lambda _uid: None)
+            member = SimpleNamespace(guild=guild, roles=[SimpleNamespace(id=111)])
+            assert adapter._is_allowed_user("888", member, guild=guild) is True
+            assert adapter._is_allowed_user("888", None, guild=guild) is False
+            other_guild_member = SimpleNamespace(guild=SimpleNamespace(id=2), roles=member.roles)
+            assert adapter._is_allowed_user("888", other_guild_member, guild=guild) is False
+            assert adapter._is_allowed_user("888", member, is_dm=True) is False
+            assert adapter._is_allowed_user("777", is_dm=True) is True
+            monkeypatch.setattr(discord_platform, "_read_dm_role_auth_guild", lambda: 1)
+            monkeypatch.setattr(adapter._client, "get_guild", lambda _id: guild, raising=False)
+            assert adapter._is_allowed_user("888", member, is_dm=True) is False
+        finally:
+            await adapter.disconnect()
 
     @pytest.mark.asyncio
     async def test_connect_sets_non_retryable_fatal(self, monkeypatch):
