@@ -549,12 +549,13 @@ async def test_send_path_recovery_replays_failed_responses_once(degraded, expect
     adapter._write_runtime_status_safe = MagicMock()
     generation, _ = adapter._begin_polling_generation()
     adapter._send_path_degraded = degraded
+    before = set(tg_adapter._REDELIVERY_TASKS)
 
     assert adapter._record_polling_progress(generation) is True
     assert adapter._send_path_degraded is False
     assert adapter._record_polling_progress(generation) is True
     assert not adapter._background_tasks
-    await asyncio.gather(*list(tg_adapter._REDELIVERY_TASKS))
+    await asyncio.gather(*(set(tg_adapter._REDELIVERY_TASKS) - before))
 
     calls = runner._redeliver_failed_obligations_for_platform.await_args_list
     assert len(calls) == expected_calls
@@ -572,6 +573,135 @@ async def test_send_path_recovery_without_runner_still_records_progress():
     generation, progress = adapter._begin_polling_generation()
     adapter._send_path_degraded = True
 
+    before = set(tg_adapter._REDELIVERY_TASKS)
     assert adapter._record_polling_progress(generation) is True
     assert progress.is_set() and adapter._send_path_degraded is False
-    assert not adapter._background_tasks and not tg_adapter._REDELIVERY_TASKS
+    assert not adapter._background_tasks and set(tg_adapter._REDELIVERY_TASKS) == before
+
+
+def test_runner_sweep_signature_accepts_the_adapter_call():
+    import inspect
+    from gateway.run import GatewayRunner
+    inspect.signature(GatewayRunner._redeliver_failed_obligations_for_platform).bind(
+        object(), tg_adapter.Platform.TELEGRAM, profile="cami")
+    assert asyncio.iscoroutinefunction(GatewayRunner._redeliver_failed_obligations_for_platform)
+
+
+@pytest.mark.asyncio
+async def test_flapping_send_path_runs_one_sweep_at_a_time_and_one_follow_up():
+    adapter = _make_adapter()
+    adapter._running = True
+    adapter._owner_profile = "flap"
+    adapter._write_runtime_status_safe = MagicMock()
+    release = asyncio.Event()
+    calls = []
+
+    async def sweep(platform, *, profile=None):
+        calls.append((platform, profile))
+        if len(calls) == 1:
+            await release.wait()
+        return 0
+
+    runner = MagicMock()
+    runner._redeliver_failed_obligations_for_platform = sweep
+    adapter.gateway_runner = runner
+    for _ in range(3):  # degrade -> recover three times while the first sweep is still running
+        generation, _ = adapter._begin_polling_generation()
+        assert adapter._record_polling_progress(generation) is True
+        await asyncio.sleep(0)
+    assert len(calls) == 1
+    release.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert calls == [(tg_adapter.Platform.TELEGRAM, "flap")] * 2
+    key = (id(adapter), "flap")
+    assert key not in tg_adapter._REDELIVERY_INFLIGHT and key not in tg_adapter._REDELIVERY_RERUN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate", ["degraded", "teardown"])
+async def test_queued_follow_up_is_dropped_when_path_degraded_or_tearing_down(gate):
+    adapter = _make_adapter()
+    adapter._running = True
+    adapter._owner_profile = "gate-" + gate
+    adapter._write_runtime_status_safe = MagicMock()
+    release = asyncio.Event()
+    calls = []
+
+    async def sweep(platform, *, profile=None):
+        calls.append(profile)
+        await release.wait()
+        return 0
+
+    adapter.gateway_runner = MagicMock(_redeliver_failed_obligations_for_platform=sweep)
+    for _ in range(2):
+        generation, _ = adapter._begin_polling_generation()
+        assert adapter._record_polling_progress(generation) is True
+        await asyncio.sleep(0)
+    key = (id(adapter), adapter._owner_profile)
+    assert len(calls) == 1 and key in tg_adapter._REDELIVERY_RERUN
+    if gate == "degraded":
+        adapter._send_path_degraded = True
+    else:
+        adapter._polling_teardown_started = True
+    release.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert len(calls) == 1
+    assert key not in tg_adapter._REDELIVERY_INFLIGHT and key not in tg_adapter._REDELIVERY_RERUN
+
+
+@pytest.mark.asyncio
+async def test_stale_in_flight_slot_does_not_block_recovery(monkeypatch):
+    adapter = _make_adapter()
+    adapter._running = True
+    adapter._owner_profile = "stale"
+    adapter._write_runtime_status_safe = MagicMock()
+    hung = asyncio.Event()
+    calls = []
+
+    async def sweep(platform, *, profile=None):
+        calls.append(profile)
+        await hung.wait()
+
+    adapter.gateway_runner = MagicMock(_redeliver_failed_obligations_for_platform=sweep)
+    before = set(tg_adapter._REDELIVERY_TASKS)
+    generation, _ = adapter._begin_polling_generation()
+    adapter._record_polling_progress(generation)
+    await asyncio.sleep(0)
+    key = (id(adapter), "stale")
+    task, started = tg_adapter._REDELIVERY_INFLIGHT[key]
+    tg_adapter._REDELIVERY_INFLIGHT[key] = (task, started - tg_adapter._REDELIVERY_SLOT_DEADLINE_S - 1)
+    generation, _ = adapter._begin_polling_generation()
+    adapter._record_polling_progress(generation)
+    await asyncio.sleep(0)
+    assert len(calls) == 2
+    hung.set()
+    await asyncio.gather(*(set(tg_adapter._REDELIVERY_TASKS) - before))
+
+
+@pytest.mark.asyncio
+async def test_replacement_adapter_is_not_blocked_by_old_instance_sweep():
+    release = asyncio.Event()
+    calls = []
+
+    async def sweep(platform, *, profile=None):
+        calls.append(profile)
+        await release.wait()
+
+    adapters = []
+    before = set(tg_adapter._REDELIVERY_TASKS)
+    for _ in range(2):
+        adapter = _make_adapter()
+        adapter._running = True
+        adapter._owner_profile = "same-profile"
+        adapter._write_runtime_status_safe = MagicMock()
+        adapter.gateway_runner = MagicMock(_redeliver_failed_obligations_for_platform=sweep)
+        generation, _ = adapter._begin_polling_generation()
+        adapter._record_polling_progress(generation)
+        await asyncio.sleep(0)
+        adapters.append(adapter)
+    assert len(calls) == 2
+    release.set()
+    await asyncio.gather(*(set(tg_adapter._REDELIVERY_TASKS) - before))
+

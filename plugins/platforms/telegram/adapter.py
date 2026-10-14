@@ -40,6 +40,12 @@ def _redact_telegram_error_text(error: object) -> str:
 
 
 _REDELIVERY_TASKS: set[asyncio.Task] = set()
+# (adapter id, profile) -> (in-flight sweep, monotonic start); a recovery during a sweep requests
+# exactly one follow-up. A slot older than the deadline is treated as free so a hung sweep cannot
+# suppress recovery forever.
+_REDELIVERY_INFLIGHT: dict = {}
+_REDELIVERY_RERUN: set = set()
+_REDELIVERY_SLOT_DEADLINE_S = 600.0
 
 
 def _consume_abandoned_task(task: asyncio.Task) -> None:
@@ -1831,16 +1837,38 @@ class TelegramAdapter(BasePlatformAdapter):
                 logger.warning("[%s] Failed-reply redelivery unavailable after send-path recovery (profile %s)",
                                self.name, profile)
                 return
+            key = (id(self), profile)
+            current, started = _REDELIVERY_INFLIGHT.get(key, (None, 0.0))
+            if (current is not None and not current.done()
+                    and time.monotonic() - started < _REDELIVERY_SLOT_DEADLINE_S):
+                # A flapping send path must not start concurrent sweeps that each spend attempts.
+                _REDELIVERY_RERUN.add(key)
+                logger.info("[%s] Failed-reply sweep already in flight; one follow-up queued (profile %s)",
+                            self.name, profile)
+                return
             task = asyncio.get_running_loop().create_task(redeliver(Platform.TELEGRAM, profile=profile))
             # Not in _background_tasks: teardown cancels those, and a sweep cancelled between claim and
             # send would strand the row as 'attempting'. The runner resolves the live adapter itself.
             _REDELIVERY_TASKS.add(task)
+            _REDELIVERY_INFLIGHT[key] = (task, time.monotonic())
             task.add_done_callback(_REDELIVERY_TASKS.discard)
             task.add_done_callback(_consume_abandoned_task)
+            task.add_done_callback(lambda done: self._finish_failed_redelivery(key, done))
             logger.info("[%s] Send path recovered; sweeping failed replies (profile %s)", self.name, profile)
         except Exception:
             logger.warning("[%s] Could not schedule failed-reply redelivery (profile %s)",
                            self.name, profile, exc_info=True)
+
+    def _finish_failed_redelivery(self, key, task) -> None:
+        """Release the in-flight slot; run the one queued follow-up while the send path is healthy."""
+        if _REDELIVERY_INFLIGHT.get(key, (None,))[0] is task:
+            del _REDELIVERY_INFLIGHT[key]
+        if key in _REDELIVERY_RERUN:
+            _REDELIVERY_RERUN.discard(key)
+            # A degraded path gets its own sweep on the next recovery; a closing adapter's rows go to its
+            # replacement's reconnect sweep.
+            if not self._send_path_degraded and not self._teardown_started:
+                self._schedule_failed_redelivery()
 
     def _observe_polling_request_result(self, request, generation, result):
         """Record getUpdates progress from an observed do_request result (purely observational: PTB still
