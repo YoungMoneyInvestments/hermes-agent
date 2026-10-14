@@ -1795,7 +1795,6 @@ class TelegramAdapter(BasePlatformAdapter):
             # After network-error WARNINGs the line must read as the matching recovery event (#111211).
             state = "recovered" if self._polling_network_error_count else "confirmed healthy"
             logger.info("[%s] Telegram polling %s: getUpdates progressing (generation %d)", self.name, state, generation)
-        recovered = bool(self._polling_network_error_count)
         self._polling_progress_event.set()
         self._polling_last_progress_monotonic = time.monotonic()
         self._polling_network_error_count = 0
@@ -1810,29 +1809,33 @@ class TelegramAdapter(BasePlatformAdapter):
             self._write_runtime_status_safe(
                 "connected", platform_state="connected", error_code=None, error_message=None,
             )
-            if recovered:
-                self._schedule_failed_redelivery()
+            self._schedule_failed_redelivery()
         self._send_path_degraded = False
         return True
 
     def _schedule_failed_redelivery(self) -> None:
-        """Replay responses rejected with ``send_path_degraded`` after an in-place polling recovery.
+        """Replay responses rejected with ``send_path_degraded`` once the send path is connected again.
 
         The runner sweeps failed ledger rows when it reconnects or replaces an adapter, but an
         in-place recovery keeps this adapter object, so nothing else claims them until a restart.
-        The sweep claims rows atomically, so overlapping with a runner reconnect is idempotent."""
-        runner = getattr(self, "gateway_runner", None)
-        redeliver = getattr(runner, "_redeliver_failed_obligations_for_platform", None)
-        if not callable(redeliver):
-            return
+        The sweep claims rows atomically, so overlapping with a runner reconnect is idempotent.
+        Best-effort: a scheduling failure is logged and never disturbs polling progress."""
+        profile = getattr(self, "_owner_profile", None)
         try:
-            task = asyncio.get_running_loop().create_task(
-                redeliver(Platform.TELEGRAM, profile=getattr(self, "_owner_profile", None)))
-        except RuntimeError:
-            return
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-        task.add_done_callback(_consume_abandoned_task)
+            redeliver = getattr(getattr(self, "gateway_runner", None),
+                                "_redeliver_failed_obligations_for_platform", None)
+            if not asyncio.iscoroutinefunction(redeliver):
+                logger.warning("[%s] Failed-reply redelivery unavailable after send-path recovery (profile %s)",
+                               self.name, profile)
+                return
+            task = asyncio.get_running_loop().create_task(redeliver(Platform.TELEGRAM, profile=profile))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+            task.add_done_callback(_consume_abandoned_task)
+            logger.info("[%s] Send path recovered; sweeping failed replies (profile %s)", self.name, profile)
+        except Exception:
+            logger.warning("[%s] Could not schedule failed-reply redelivery (profile %s)",
+                           self.name, profile, exc_info=True)
 
     def _observe_polling_request_result(self, request, generation, result):
         """Record getUpdates progress from an observed do_request result (purely observational: PTB still

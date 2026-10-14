@@ -536,9 +536,10 @@ async def test_disconnect_cancels_recovery_before_it_can_rearm_progress(monkeypa
         await asyncio.gather(recovery, disconnect, return_exceptions=True)
 
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("network_errors, expected_calls", [(2, 1), (0, 0)])
-async def test_in_place_recovery_replays_failed_responses_once(network_errors, expected_calls):
+@pytest.mark.parametrize("degraded, expected_calls", [(True, 1), (False, 0)])
+async def test_send_path_recovery_replays_failed_responses_once(degraded, expected_calls):
     adapter = _make_adapter()
     adapter._running = True
     adapter._owner_profile = "cami"
@@ -547,14 +548,27 @@ async def test_in_place_recovery_replays_failed_responses_once(network_errors, e
     adapter.gateway_runner = runner
     adapter._write_runtime_status_safe = MagicMock()
     generation, _ = adapter._begin_polling_generation()
-    adapter._polling_network_error_count = network_errors
+    adapter._send_path_degraded = degraded
 
     assert adapter._record_polling_progress(generation) is True
+    assert adapter._send_path_degraded is False
     assert adapter._record_polling_progress(generation) is True
     await asyncio.gather(*list(adapter._background_tasks))
 
-    assert adapter._send_path_degraded is False
     calls = runner._redeliver_failed_obligations_for_platform.await_args_list
     assert len(calls) == expected_calls
     if expected_calls:
+        assert calls[0].args == (tg_adapter.Platform.TELEGRAM,)
         assert calls[0].kwargs == {"profile": "cami"}
+
+
+@pytest.mark.asyncio
+async def test_send_path_recovery_without_runner_still_records_progress():
+    adapter = _make_adapter()
+    adapter._running = True
+    adapter.gateway_runner = None
+    adapter._write_runtime_status_safe = MagicMock()
+    generation, progress = adapter._begin_polling_generation()
+
+    assert adapter._record_polling_progress(generation) is True
+    assert progress.is_set() and adapter._send_path_degraded is False
