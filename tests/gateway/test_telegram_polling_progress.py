@@ -553,7 +553,8 @@ async def test_send_path_recovery_replays_failed_responses_once(degraded, expect
     assert adapter._record_polling_progress(generation) is True
     assert adapter._send_path_degraded is False
     assert adapter._record_polling_progress(generation) is True
-    await asyncio.gather(*list(adapter._background_tasks))
+    assert not adapter._background_tasks
+    await asyncio.gather(*list(tg_adapter._REDELIVERY_TASKS))
 
     calls = runner._redeliver_failed_obligations_for_platform.await_args_list
     assert len(calls) == expected_calls
@@ -569,6 +570,8 @@ async def test_send_path_recovery_without_runner_still_records_progress():
     adapter.gateway_runner = None
     adapter._write_runtime_status_safe = MagicMock()
     generation, progress = adapter._begin_polling_generation()
+    adapter._send_path_degraded = True
 
     assert adapter._record_polling_progress(generation) is True
     assert progress.is_set() and adapter._send_path_degraded is False
+    assert not adapter._background_tasks and not tg_adapter._REDELIVERY_TASKS

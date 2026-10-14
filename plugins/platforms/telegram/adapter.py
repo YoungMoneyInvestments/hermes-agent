@@ -39,6 +39,9 @@ def _redact_telegram_error_text(error: object) -> str:
         return "<telegram error redacted>"
 
 
+_REDELIVERY_TASKS: set[asyncio.Task] = set()
+
+
 def _consume_abandoned_task(task: asyncio.Task) -> None:
     """Observe a detached task's terminal exception to avoid noisy loop logs."""
     try:
@@ -1829,8 +1832,10 @@ class TelegramAdapter(BasePlatformAdapter):
                                self.name, profile)
                 return
             task = asyncio.get_running_loop().create_task(redeliver(Platform.TELEGRAM, profile=profile))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            # Not in _background_tasks: teardown cancels those, and a sweep cancelled between claim and
+            # send would strand the row as 'attempting'. The runner resolves the live adapter itself.
+            _REDELIVERY_TASKS.add(task)
+            task.add_done_callback(_REDELIVERY_TASKS.discard)
             task.add_done_callback(_consume_abandoned_task)
             logger.info("[%s] Send path recovered; sweeping failed replies (profile %s)", self.name, profile)
         except Exception:
