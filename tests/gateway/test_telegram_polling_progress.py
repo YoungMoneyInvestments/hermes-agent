@@ -581,10 +581,25 @@ async def test_send_path_recovery_without_runner_still_records_progress():
 
 def test_runner_sweep_signature_accepts_the_adapter_call():
     import inspect
-    from gateway.run import GatewayRunner
-    inspect.signature(GatewayRunner._redeliver_failed_obligations_for_platform).bind(
-        object(), tg_adapter.Platform.TELEGRAM, profile="cami")
-    assert asyncio.iscoroutinefunction(GatewayRunner._redeliver_failed_obligations_for_platform)
+    # The runner inherits the sweep from this mixin; importing gateway.run would bootstrap the real home.
+    from gateway.run_startup import GatewayStartupMixin
+    sweep = GatewayStartupMixin._redeliver_failed_obligations_for_platform
+    inspect.signature(sweep).bind(object(), tg_adapter.Platform.TELEGRAM, profile="cami")
+    assert asyncio.iscoroutinefunction(sweep)
+    # GatewayRunner must resolve to this definition: it lists the mixin as a base and no other gateway
+    # module redefines the method (checked from source so the real home is never bootstrapped).
+    import ast
+    from pathlib import Path
+    gateway_dir = Path(inspect.getfile(GatewayStartupMixin)).parent
+    tree = ast.parse((gateway_dir / "run.py").read_text())
+    runner = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "GatewayRunner")
+    assert "GatewayStartupMixin" in {getattr(b, "id", None) for b in runner.bases}
+    name = "_redeliver_failed_obligations_for_platform"
+    definers = sorted(
+        str(p.relative_to(gateway_dir)) for p in gateway_dir.rglob("*.py")
+        if any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+               for node in ast.walk(ast.parse(p.read_text()))))
+    assert definers == ["run_startup.py"]  # so no base ahead of the mixin in the MRO can shadow it
 
 
 @pytest.mark.asyncio
