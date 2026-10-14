@@ -594,9 +594,12 @@ def test_runner_sweep_signature_accepts_the_adapter_call():
     tree = ast.parse((gateway_dir / "run.py").read_text())
     runner = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "GatewayRunner")
     assert "GatewayStartupMixin" in {getattr(b, "id", None) for b in runner.bases}
-    definers = [p.name for p in gateway_dir.glob("*.py")
-                if "def _redeliver_failed_obligations_for_platform" in p.read_text()]
-    assert definers == ["run_startup.py"]
+    name = "_redeliver_failed_obligations_for_platform"
+    definers = sorted(
+        str(p.relative_to(gateway_dir)) for p in gateway_dir.rglob("*.py")
+        if any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+               for node in ast.walk(ast.parse(p.read_text()))))
+    assert definers == ["run_startup.py"]  # so no base ahead of the mixin in the MRO can shadow it
 
 
 @pytest.mark.asyncio
