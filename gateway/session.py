@@ -83,7 +83,7 @@ class SessionSource:
     guild_id: Optional[str] = None
     parent_chat_id: Optional[str] = None  # parent channel when chat_id is a thread
     message_id: Optional[str] = None  # triggering message (pin/reply/react)
-    role_authorized: bool = False  # adapter granted access via role, not user ID
+    role_authorized: bool = False  # adapter verified role or exact-channel member access; not an action grant
     # Multiplex profile this message routes to (None => active/default); namespaces the key.
     profile: Optional[str] = None
     # Transport-local fail-closed signal: explicit profile route whose target is not served.

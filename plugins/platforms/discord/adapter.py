@@ -1160,6 +1160,8 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         from hermes_constants import get_hermes_home
         from plugins.platforms.discord.recovery import DiscordRecoveryStore
         self._discord_recovery_store = DiscordRecoveryStore(get_hermes_home())
+        from .channel_access import ChannelMemberAccess
+        self._member_access_policy = ChannelMemberAccess(get_hermes_home(), self.config.extra)
         # Dedup cache: Discord RESUME replays events after reconnects.
         self._dedup = MessageDeduplicator()
         # Reply threading mode: "off", "first" (default; first chunk only), "all" (every chunk).
@@ -1500,7 +1502,19 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             return False, False
         if message.type not in {discord.MessageType.default, discord.MessageType.reply}:
             return False, False
-        role_authorized = False
+        member_channel_ids = {str(message.channel.id)}
+        member_parent_id = self._get_parent_channel_id(message.channel)
+        if member_parent_id:
+            member_channel_ids.add(str(member_parent_id))
+        member_authorized = self._channel_member_authorized(
+            str(message.author.id), guild=getattr(message, "guild", None),
+            channel_ids=member_channel_ids,
+        )
+        if member_authorized is False or (
+            member_authorized is True and getattr(message.author, "bot", False)
+        ):
+            return False, False
+        role_authorized = member_authorized is True
         if getattr(message.author, "bot", False):
             allow_bots = self._get_allow_bots()
             bot_tag_continuation = self._is_bot_tag_debounce_continuation(message)
@@ -1533,7 +1547,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             ):
                 self._warn_if_fail_closed_default()
                 return False, False
-            role_authorized = bool(getattr(self, "_allowed_role_ids", set()))
+            role_authorized = role_authorized or bool(getattr(self, "_allowed_role_ids", set()))
         raw_self_mention = self._self_is_explicitly_mentioned(message)
         if not isinstance(message.channel, discord.DMChannel) and (
             message.mentions or raw_self_mention
@@ -1597,13 +1611,23 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
     def _source_for_platform_event(
         self, *, chat_id: str, user_id: Optional[str], user_name: Optional[str],
         thread_id: Optional[str], guild_id: Optional[str], message_id: Optional[str] = None,
+        parent_chat_id: Optional[str] = None,
     ):
         """Build the SessionSource the gateway authorizes against; missing identity raises (fail closed)."""
         if not user_id or not chat_id:
             raise ValueError("gateway_platform_event requires actor and chat identities")
+        from .channel_access import channel_member_authorized
+        member_authorized = channel_member_authorized(
+            self._channel_member_extra(),
+            channel_ids={chat_id} | ({parent_chat_id} if parent_chat_id else set()),
+            guild_id=guild_id, user_id=user_id,
+        )
+        if member_authorized is False:
+            raise ValueError("managed channel actor is not authorized")
         return self.build_source(
             chat_id=chat_id, chat_type="thread" if thread_id else "group", user_id=user_id,
             user_name=user_name, thread_id=thread_id, guild_id=guild_id, message_id=message_id,
+            parent_chat_id=parent_chat_id, role_authorized=member_authorized is True,
         )
 
     async def _fire_platform_event(self, event: Dict[str, Any], source) -> None:
@@ -1659,6 +1683,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             chat_id=str(chat_id), user_id=str(getattr(author, "id", "") or "") or None,
             user_name=getattr(author, "display_name", None), thread_id=thread_id,
             guild_id=str(getattr(guild, "id", "")) if guild else None, message_id=str(message_id),
+            parent_chat_id=self._get_parent_channel_id(message.channel),
         )
 
     @staticmethod
@@ -1680,6 +1705,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             chat_id=str(thread_id), user_id=str(owner_id) if owner_id is not None else None,
             user_name=None, thread_id=str(thread_id),
             guild_id=str(getattr(guild, "id", "")) if guild else None,
+            parent_chat_id=str(parent_id) if parent_id is not None else None,
         )
 
     async def _on_platform_message_edit(self, before, after) -> None:
@@ -3948,6 +3974,42 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         except Exception:
             return False
 
+    def _channel_member_authorized(
+        self, user_id: str, *, guild=None, channel_ids: Optional[set[str]] = None,
+    ) -> bool | None:
+        from .channel_access import channel_member_authorized
+        return channel_member_authorized(
+            self._channel_member_extra(),
+            channel_ids=channel_ids, guild_id=getattr(guild, "id", None), user_id=user_id,
+        )
+
+    def authorize_channel_actor(self, source) -> bool | None:
+        """Recheck managed channel access before gateway-wide grants, including restored events."""
+        if getattr(source, "chat_type", None) == "dm":
+            return None
+        from .channel_access import channel_member_authorized
+        parent = getattr(source, "parent_chat_id", None)
+        verdict = channel_member_authorized(
+            self._channel_member_extra(),
+            channel_ids={str(source.chat_id)} | ({str(parent)} if parent else set()),
+            guild_id=getattr(source, "scope_id", None) or getattr(source, "guild_id", None),
+            user_id=str(getattr(source, "user_id", "") or ""),
+        )
+        if verdict is True and getattr(source, "is_bot", False):
+            return False
+        return verdict
+
+    def _channel_member_extra(self) -> dict:
+        policy = getattr(self, "_member_access_policy", None)
+        if policy is not None:
+            return policy.extra()
+        extra = getattr(getattr(self, "config", None), "extra", None)
+        return extra if isinstance(extra, dict) else {}
+
+    def _managed_channel_ids(self) -> set[str]:
+        from .channel_access import active_channel_ids
+        return active_channel_ids(self._channel_member_extra())
+
     def _is_allowed_user(
         self, user_id: str, author=None, *, guild=None, is_dm: bool = False,
         channel_ids: Optional[set[str]] = None,
@@ -3957,6 +4019,11 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         DMs use user IDs only unless ``discord.dm_role_auth_guild`` names one guild (no escalation).
         """
         # getattr fallbacks: test fixtures build the adapter via object.__new__ and skip __init__.
+        member_authorized = self._channel_member_authorized(
+            user_id, guild=guild, channel_ids=channel_ids if not is_dm else None,
+        )
+        if member_authorized is not None:
+            return member_authorized
         allowed_users = getattr(self, "_allowed_user_ids", set())
         allowed_roles = getattr(self, "_allowed_role_ids", set())
         has_users = bool(allowed_users)
@@ -4737,6 +4804,10 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             user_id=str(interaction.user.id), user_name=interaction.user.display_name,
             thread_id=thread_id, chat_topic=chat_topic,
             guild_id=self._interaction_guild_id(interaction), parent_chat_id=parent_id or None,
+            role_authorized=self._channel_member_authorized(
+                str(interaction.user.id), guild=getattr(interaction, "guild", None),
+                channel_ids={str(interaction.channel_id)} | ({parent_id} if parent_id else set()),
+            ) is True,
         )
         msg_type = MessageType.COMMAND if text.startswith("/") else MessageType.TEXT
         channel_id = str(interaction.channel_id)
@@ -4797,6 +4868,10 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             user_id=str(interaction.user.id), user_name=interaction.user.display_name,
             thread_id=thread_id, chat_topic=chat_topic,
             guild_id=self._interaction_guild_id(interaction), parent_chat_id=_parent_id or None,
+            role_authorized=self._channel_member_authorized(
+                str(interaction.user.id), guild=getattr(interaction, "guild", None),
+                channel_ids={thread_id} | ({_parent_id} if _parent_id else set()),
+            ) is True,
         )
         _skills = self._resolve_channel_skills(thread_id, _parent_id or None)
         _channel_prompt = self._resolve_channel_prompt(thread_id, _parent_id or None)
@@ -4820,6 +4895,15 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
     def _resolve_channel_prompt(self, channel_id: str, parent_id: str | None = None) -> str | None:
         """Resolve a Discord per-channel prompt, preferring the exact channel over its parent."""
         from gateway.platforms.base import resolve_channel_prompt
+        managed = self._channel_member_extra()
+        policy = managed.get("channel_member_access")
+        channels = policy.get("channels", {}) if isinstance(policy, dict) else {}
+        if isinstance(channels, dict) and (channel_id in channels or parent_id in channels):
+            from .channel_access import active_channel_ids
+            matched = {key for key in (channel_id, parent_id) if key in channels}
+            if not matched <= active_channel_ids(managed):
+                return None
+            return resolve_channel_prompt(managed, channel_id, parent_id)
         return resolve_channel_prompt(self.config.extra, channel_id, parent_id)
 
     def _extra_or_env_flag(self, key: str, env_key: str, env_default: str, *, truthy: bool) -> bool:
@@ -4923,7 +5007,9 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
 
     def _get_allowed_channels(self) -> set:
         """This adapter's DISCORD_ALLOWED_CHANNELS gate (per-profile)."""
-        return self._gate_csv_set(self._gate_raw("allowed_channels", "DISCORD_ALLOWED_CHANNELS"))
+        base = self._gate_csv_set(self._gate_raw("allowed_channels", "DISCORD_ALLOWED_CHANNELS"))
+        # An unset whitelist keeps existing channel scope; member admission still gates private routes.
+        return base | self._managed_channel_ids() if base else base
 
     def _get_ignored_channels(self) -> set:
         """This adapter's DISCORD_IGNORED_CHANNELS gate (per-profile)."""
@@ -4931,7 +5017,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
 
     def _get_no_thread_channels(self) -> set:
         """This adapter's DISCORD_NO_THREAD_CHANNELS list (per-profile)."""
-        return self._gate_csv_set(self._gate_raw("no_thread_channels", "DISCORD_NO_THREAD_CHANNELS"))
+        return self._gate_csv_set(self._gate_raw("no_thread_channels", "DISCORD_NO_THREAD_CHANNELS")) | self._managed_channel_ids()
 
     def _get_allowed_users(self) -> set:
         """This adapter's DISCORD_ALLOWED_USERS entries (per-profile, cleaned)."""
@@ -5019,7 +5105,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         raw = self.config.extra.get("free_response_channels")
         if raw is None:
             raw = self._gate_env("DISCORD_FREE_RESPONSE_CHANNELS")
-        return self._gate_csv_set(raw)
+        return self._gate_csv_set(raw) | self._managed_channel_ids()
 
     def _raw_mentioned_user_ids(self, message: Any) -> set:
         """Extract user-mention IDs (``<@ID>`` and legacy ``<@!ID>``) from raw content,
@@ -5545,6 +5631,8 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         try:
             channel = await self._resolve_channel(_prompt_target_id(chat_id, metadata))
             send_kwargs, view = build(channel)
+            if view is not None:
+                view._channel_member_gate = self._member_interaction_allowed
             msg = await channel.send(**send_kwargs)
             if view is not None:
                 view._message = msg
@@ -5553,6 +5641,20 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             if fail_log:
                 logger.warning("[%s] %s failed: %s", self.name, fail_log, e)
             return SendResult(success=False, error=str(e))
+
+    def _member_interaction_allowed(self, interaction) -> bool:
+        from .channel_access import _snowflake
+        channel = getattr(interaction, "channel", None)
+        channel_id = getattr(interaction, "channel_id", None) or getattr(channel, "id", None)
+        parent_id = self._get_parent_channel_id(channel) if channel is not None else None
+        if not _snowflake(str(channel_id)) or (parent_id is not None and not _snowflake(str(parent_id))):
+            return False
+        verdict = self._channel_member_authorized(
+            str(getattr(getattr(interaction, "user", None), "id", "") or ""),
+            guild=getattr(interaction, "guild", None),
+            channel_ids={str(channel_id)} | ({str(parent_id)} if parent_id else set()),
+        )
+        return verdict is not False
 
     # Payload lives in plain content: embeds can be invisible/detached on web/mobile. Properties, not
     # class constants: the wording comes from the catalog for the language active at send time.
@@ -6325,8 +6427,11 @@ def _define_discord_view_classes() -> None:
             self.allowed_role_ids = allowed_role_ids or set()
             self.resolved = False
             self._message = None
+            self._channel_member_gate = None
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
+            if self._channel_member_gate is not None and not self._channel_member_gate(interaction):
+                return False
             return _component_check_auth(interaction, self.allowed_user_ids, self.allowed_role_ids)
 
         async def _gate(self, interaction: discord.Interaction, *, resolved_msg: Optional[str], unauth_msg: str) -> bool:

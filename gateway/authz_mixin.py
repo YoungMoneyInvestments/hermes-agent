@@ -633,6 +633,18 @@ class GatewayAuthorizationMixin:
             return True
 
         adapter_profile = self._adapter_profile_for_source(source)
+        adapter = self._authorization_adapter(source.platform, adapter_profile)
+        actor_gate = getattr(adapter, "authorize_channel_actor", None)
+        if callable(actor_gate):
+            try:
+                verdict = actor_gate(source)
+            except Exception as exc:
+                logger.warning("Channel actor authorization failed (%s)", type(exc).__name__)
+                return False
+            if verdict is False:
+                return False
+            if verdict is True and allow_adapter_delegation:
+                return True
         is_group = source.chat_type in _GROUP_CHAT_TYPES
         is_group_or_forum = source.chat_type in _GROUP_FORUM_TYPES
         if self._chat_scoped_grant(source, adapter_profile, is_group, allow_adapter_delegation):
@@ -650,7 +662,8 @@ class GatewayAuthorizationMixin:
                 platform_allow_all_var = getattr(entry, "allow_all_env", "") or platform_allow_all_var
         if platform_allow_all_var and _env_truthy(platform_allow_all_var):
             return True
-        # Adapter-verified role auth (Discord DISCORD_ALLOWED_ROLES). ``is True``: no MagicMock pass.
+        # Adapter-verified Discord role or exact-channel member access. Not action/approval authority.
+        # ``is True``: no MagicMock pass.
         if allow_adapter_delegation and getattr(source, "role_authorized", False) is True:
             return True
         # Pairing store: a first-class grant created only by an operator approving a code. Honored as

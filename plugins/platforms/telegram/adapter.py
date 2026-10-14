@@ -39,6 +39,9 @@ def _redact_telegram_error_text(error: object) -> str:
         return "<telegram error redacted>"
 
 
+_REDELIVERY_TASKS: set[asyncio.Task] = set()
+
+
 def _consume_abandoned_task(task: asyncio.Task) -> None:
     """Observe a detached task's terminal exception to avoid noisy loop logs."""
     try:
@@ -1809,8 +1812,35 @@ class TelegramAdapter(BasePlatformAdapter):
             self._write_runtime_status_safe(
                 "connected", platform_state="connected", error_code=None, error_message=None,
             )
+            self._schedule_failed_redelivery()
         self._send_path_degraded = False
         return True
+
+    def _schedule_failed_redelivery(self) -> None:
+        """Replay responses rejected with ``send_path_degraded`` once the send path is connected again.
+
+        The runner sweeps failed ledger rows when it reconnects or replaces an adapter, but an
+        in-place recovery keeps this adapter object, so nothing else claims them until a restart.
+        The sweep claims rows atomically, so overlapping with a runner reconnect is idempotent.
+        Best-effort: a scheduling failure is logged and never disturbs polling progress."""
+        profile = getattr(self, "_owner_profile", None)
+        try:
+            redeliver = getattr(getattr(self, "gateway_runner", None),
+                                "_redeliver_failed_obligations_for_platform", None)
+            if not asyncio.iscoroutinefunction(redeliver):
+                logger.warning("[%s] Failed-reply redelivery unavailable after send-path recovery (profile %s)",
+                               self.name, profile)
+                return
+            task = asyncio.get_running_loop().create_task(redeliver(Platform.TELEGRAM, profile=profile))
+            # Not in _background_tasks: teardown cancels those, and a sweep cancelled between claim and
+            # send would strand the row as 'attempting'. The runner resolves the live adapter itself.
+            _REDELIVERY_TASKS.add(task)
+            task.add_done_callback(_REDELIVERY_TASKS.discard)
+            task.add_done_callback(_consume_abandoned_task)
+            logger.info("[%s] Send path recovered; sweeping failed replies (profile %s)", self.name, profile)
+        except Exception:
+            logger.warning("[%s] Could not schedule failed-reply redelivery (profile %s)",
+                           self.name, profile, exc_info=True)
 
     def _observe_polling_request_result(self, request, generation, result):
         """Record getUpdates progress from an observed do_request result (purely observational: PTB still
