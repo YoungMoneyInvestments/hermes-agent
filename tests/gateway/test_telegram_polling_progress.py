@@ -581,10 +581,11 @@ async def test_send_path_recovery_without_runner_still_records_progress():
 
 def test_runner_sweep_signature_accepts_the_adapter_call():
     import inspect
-    from gateway.run import GatewayRunner
-    inspect.signature(GatewayRunner._redeliver_failed_obligations_for_platform).bind(
-        object(), tg_adapter.Platform.TELEGRAM, profile="cami")
-    assert asyncio.iscoroutinefunction(GatewayRunner._redeliver_failed_obligations_for_platform)
+    # The runner inherits the sweep from this mixin; importing gateway.run would bootstrap the real home.
+    from gateway.run_startup import GatewayStartupMixin
+    sweep = GatewayStartupMixin._redeliver_failed_obligations_for_platform
+    inspect.signature(sweep).bind(object(), tg_adapter.Platform.TELEGRAM, profile="cami")
+    assert asyncio.iscoroutinefunction(sweep)
 
 
 @pytest.mark.asyncio
