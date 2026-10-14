@@ -586,6 +586,17 @@ def test_runner_sweep_signature_accepts_the_adapter_call():
     sweep = GatewayStartupMixin._redeliver_failed_obligations_for_platform
     inspect.signature(sweep).bind(object(), tg_adapter.Platform.TELEGRAM, profile="cami")
     assert asyncio.iscoroutinefunction(sweep)
+    # GatewayRunner must resolve to this definition: it lists the mixin as a base and no other gateway
+    # module redefines the method (checked from source so the real home is never bootstrapped).
+    import ast
+    from pathlib import Path
+    gateway_dir = Path(inspect.getfile(GatewayStartupMixin)).parent
+    tree = ast.parse((gateway_dir / "run.py").read_text())
+    runner = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "GatewayRunner")
+    assert "GatewayStartupMixin" in {getattr(b, "id", None) for b in runner.bases}
+    definers = [p.name for p in gateway_dir.glob("*.py")
+                if "def _redeliver_failed_obligations_for_platform" in p.read_text()]
+    assert definers == ["run_startup.py"]
 
 
 @pytest.mark.asyncio
