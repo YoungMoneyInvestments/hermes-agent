@@ -40,6 +40,9 @@ def _redact_telegram_error_text(error: object) -> str:
 
 
 _REDELIVERY_TASKS: set[asyncio.Task] = set()
+# profile -> in-flight sweep; a recovery during a sweep requests exactly one follow-up sweep.
+_REDELIVERY_INFLIGHT: dict = {}
+_REDELIVERY_RERUN: set = set()
 
 
 def _consume_abandoned_task(task: asyncio.Task) -> None:
@@ -1831,16 +1834,34 @@ class TelegramAdapter(BasePlatformAdapter):
                 logger.warning("[%s] Failed-reply redelivery unavailable after send-path recovery (profile %s)",
                                self.name, profile)
                 return
+            current = _REDELIVERY_INFLIGHT.get(profile)
+            if current is not None and not current.done():
+                # A flapping send path must not start concurrent sweeps that each spend attempts.
+                _REDELIVERY_RERUN.add(profile)
+                logger.info("[%s] Failed-reply sweep already in flight; one follow-up queued (profile %s)",
+                            self.name, profile)
+                return
             task = asyncio.get_running_loop().create_task(redeliver(Platform.TELEGRAM, profile=profile))
             # Not in _background_tasks: teardown cancels those, and a sweep cancelled between claim and
             # send would strand the row as 'attempting'. The runner resolves the live adapter itself.
             _REDELIVERY_TASKS.add(task)
+            _REDELIVERY_INFLIGHT[profile] = task
             task.add_done_callback(_REDELIVERY_TASKS.discard)
             task.add_done_callback(_consume_abandoned_task)
+            task.add_done_callback(lambda done: self._finish_failed_redelivery(profile, done))
             logger.info("[%s] Send path recovered; sweeping failed replies (profile %s)", self.name, profile)
         except Exception:
             logger.warning("[%s] Could not schedule failed-reply redelivery (profile %s)",
                            self.name, profile, exc_info=True)
+
+    def _finish_failed_redelivery(self, profile, task) -> None:
+        """Release the in-flight slot; run the one queued follow-up while the send path is healthy."""
+        if _REDELIVERY_INFLIGHT.get(profile) is task:
+            del _REDELIVERY_INFLIGHT[profile]
+        if profile in _REDELIVERY_RERUN:
+            _REDELIVERY_RERUN.discard(profile)
+            if not self._send_path_degraded and not self._teardown_started:
+                self._schedule_failed_redelivery()
 
     def _observe_polling_request_result(self, request, generation, result):
         """Record getUpdates progress from an observed do_request result (purely observational: PTB still

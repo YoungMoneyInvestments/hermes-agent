@@ -549,12 +549,13 @@ async def test_send_path_recovery_replays_failed_responses_once(degraded, expect
     adapter._write_runtime_status_safe = MagicMock()
     generation, _ = adapter._begin_polling_generation()
     adapter._send_path_degraded = degraded
+    before = set(tg_adapter._REDELIVERY_TASKS)
 
     assert adapter._record_polling_progress(generation) is True
     assert adapter._send_path_degraded is False
     assert adapter._record_polling_progress(generation) is True
     assert not adapter._background_tasks
-    await asyncio.gather(*list(tg_adapter._REDELIVERY_TASKS))
+    await asyncio.gather(*(set(tg_adapter._REDELIVERY_TASKS) - before))
 
     calls = runner._redeliver_failed_obligations_for_platform.await_args_list
     assert len(calls) == expected_calls
@@ -572,6 +573,46 @@ async def test_send_path_recovery_without_runner_still_records_progress():
     generation, progress = adapter._begin_polling_generation()
     adapter._send_path_degraded = True
 
+    before = set(tg_adapter._REDELIVERY_TASKS)
     assert adapter._record_polling_progress(generation) is True
     assert progress.is_set() and adapter._send_path_degraded is False
-    assert not adapter._background_tasks and not tg_adapter._REDELIVERY_TASKS
+    assert not adapter._background_tasks and set(tg_adapter._REDELIVERY_TASKS) == before
+
+
+def test_runner_sweep_signature_accepts_the_adapter_call():
+    import inspect
+    from gateway.run import GatewayRunner
+    inspect.signature(GatewayRunner._redeliver_failed_obligations_for_platform).bind(
+        object(), tg_adapter.Platform.TELEGRAM, profile="cami")
+    assert asyncio.iscoroutinefunction(GatewayRunner._redeliver_failed_obligations_for_platform)
+
+
+@pytest.mark.asyncio
+async def test_flapping_send_path_runs_one_sweep_at_a_time_and_one_follow_up():
+    adapter = _make_adapter()
+    adapter._running = True
+    adapter._owner_profile = "flap"
+    adapter._write_runtime_status_safe = MagicMock()
+    release = asyncio.Event()
+    calls = []
+
+    async def sweep(platform, *, profile=None):
+        calls.append((platform, profile))
+        if len(calls) == 1:
+            await release.wait()
+        return 0
+
+    runner = MagicMock()
+    runner._redeliver_failed_obligations_for_platform = sweep
+    adapter.gateway_runner = runner
+    for _ in range(3):  # degrade -> recover three times while the first sweep is still running
+        generation, _ = adapter._begin_polling_generation()
+        assert adapter._record_polling_progress(generation) is True
+        await asyncio.sleep(0)
+    assert len(calls) == 1
+    release.set()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert calls == [(tg_adapter.Platform.TELEGRAM, "flap")] * 2
+    assert "flap" not in tg_adapter._REDELIVERY_INFLIGHT and "flap" not in tg_adapter._REDELIVERY_RERUN
+
