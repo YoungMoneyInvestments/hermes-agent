@@ -232,6 +232,11 @@ process when they stop. The default `0` keeps the existing `Type=simple`
 behavior. This setting is Linux/systemd-only and does not treat an ordinary
 platform network disconnect as an event-loop failure.
 
+For a member-facing profile, set `gateway.home_channel_prompt: false` to suppress
+first-conversation `/sethome` setup notices. This does not select a home channel or
+change cron, cross-platform delivery, authorization, or error reporting. Keep tool
+activity private with `display.platforms.discord.tool_progress: "off"`.
+
 ## Chat Commands (Inside Messaging)
 
 | Command | Description |
