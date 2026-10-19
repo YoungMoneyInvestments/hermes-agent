@@ -1325,6 +1325,74 @@ class TestCaptureAppFilterNoMatch:
         assert backend._active_pid is None
         assert backend._active_window_id is None
 
+    @pytest.mark.parametrize("identity", [{"bundle_id": "com.hnc.Discord"},
+                                         {"bundleId": "com.hnc.Discord"},
+                                         {"display_name": "com.hnc.Discord"}])
+    def test_bounded_app_capture_and_focus_use_only_exact_app_pid(self, identity):
+        windows = [
+            {"app_name": "Other", "pid": 100, "window_id": 1, "is_on_screen": True, "z_index": 20},
+            {"app_name": "Discord", "pid": 200, "window_id": 2, "is_on_screen": True},
+        ]
+        apps = [{"name": "Discord", **identity, "pid": 200, "running": True}]
+        for operation in ("capture", "focus"):
+            backend = _make_cua_backend_with_windows_and_apps(windows, apps)
+            backend.permission_mode = "bounded"
+            if operation == "capture":
+                backend.capture(mode="ax", app="com.hnc.Discord")
+            else:
+                assert backend.focus_app("com.hnc.Discord").ok
+            assert backend._active_pid == 200
+            reads = [call.args[1] for call in backend._session.call_tool.call_args_list if call.args[0] == "list_windows"]
+            assert reads and all(args["pid"] == 200 for args in reads)
+            assert sum(call.args[0] == "list_apps" for call in backend._session.call_tool.call_args_list) == 1
+
+    def test_bounded_app_discovery_never_falls_back_to_global_or_fuzzy_windows(self):
+        for apps in ([], [{"name": "Discord", "bundle_id": "com.hnc.Discord", "pid": 200, "running": False}],
+                     [{"name": "Other Discord", "bundle_id": "com.other.Discord", "pid": 300, "running": True}]):
+            backend = _make_cua_backend_with_windows_and_apps([], apps)
+            backend.permission_mode = "bounded"
+            result = backend.capture(mode="ax", app="com.hnc.Discord")
+            assert not result.elements and backend._active_pid is None
+            assert "com.hnc.Discord" in result.window_title
+            assert not any(call.args[0] == "list_windows" for call in backend._session.call_tool.call_args_list)
+
+    def test_bounded_inventory_transport_error_disarms_and_preserves_error(self):
+        for operation in ("capture", "focus"):
+            backend = _make_cua_backend_with_windows_and_apps([], [])
+            backend.permission_mode = "bounded"
+            backend._active_pid = 99
+            backend._active_window_id = 88
+            backend._session.call_tool.side_effect = RuntimeError("inventory unavailable")
+            with pytest.raises(RuntimeError, match="inventory unavailable"):
+                if operation == "capture":
+                    backend.capture(mode="ax", app="com.hnc.Discord")
+                else:
+                    backend.focus_app("com.hnc.Discord")
+            assert backend._active_pid is None and backend._active_window_id is None
+            assert all(call.args[0] == "list_apps" for call in backend._session.call_tool.call_args_list)
+
+    def test_real_bounded_constructor_retains_mode_and_manifest(self, tmp_path):
+        from tools.computer_use.cua_backend import CuaDriverBackend
+        manifest = tmp_path / "discord.yaml"
+        manifest.write_text("version: 3\nresources:\n  apps:\n    - bundle_id: com.hnc.Discord\n")
+        with patch("tools.computer_use.cua_backend._computer_use_cfg", return_value={"capability_manifest": str(manifest)}):
+            backend = CuaDriverBackend(permission_mode="bounded")
+        assert backend.permission_mode == "bounded"
+        assert backend._embedded_daemon.permission_mode == "bounded"
+        assert backend._embedded_daemon.capability_manifest == str(manifest)
+
+    @pytest.mark.parametrize("mcp_windows", [[], [
+        {"app_name": "Other", "pid": 100, "window_id": 1, "is_on_screen": True, "z_index": 20}]])
+    def test_pid_window_refetch_retains_scope_and_rejects_other_process_rows(self, mcp_windows):
+        backend = _make_cua_backend_with_windows(mcp_windows)
+        backend._session._call_tool_via_cli.return_value = {"isError": False, "structuredContent": {"windows": [
+            {"app_name": "Discord", "pid": 200, "window_id": 2, "is_on_screen": True, "z_index": 1},
+            {"app_name": "Other", "pid": 100, "window_id": 1, "is_on_screen": True, "z_index": 20}]}}
+        windows = backend.list_windows(pid=200)
+        assert [w["pid"] for w in windows] == [200]
+        assert backend._session.call_tool.call_args.args[1]["pid"] == 200
+        assert backend._session._call_tool_via_cli.call_args.args[1]["pid"] == 200
+
     @pytest.mark.platforms("linux")
     def test_linux_default_capture_skips_gnome_shell_helper(self):
         windows = [

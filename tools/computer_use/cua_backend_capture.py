@@ -155,12 +155,31 @@ class _CaptureMixin:
         cli_out = self._cli_refetch(name, args, timeout, what, warning, *warning_args) if empty(out) else None
         return cli_out if cli_out is not None and not empty(cli_out) else out
 
-    def list_windows(self) -> List[Dict[str, Any]]:
+    def list_windows(self, *, pid: Optional[int] = None) -> List[Dict[str, Any]]:
         """Visible windows frontmost-first, re-fetching over the CLI transport when MCP returns nothing."""
-        return _sorted_windows(self._fetch_or_refetch(
-            "list_windows", {"on_screen_only": True, "session": self._session_id}, 20.0, "list_windows",
-            lambda out: not _sorted_windows(out),
-            "cua-driver list_windows returned no windows over MCP; re-fetching via CLI transport"))
+        args = {"on_screen_only": True, "session": self._session_id}
+        if pid is not None:
+            args["pid"] = pid
+        windows = _sorted_windows(self._fetch_or_refetch(
+            "list_windows", args, 20.0, "list_windows",
+            lambda out: not any(pid is None or w.get("pid") == pid for w in _sorted_windows(out)),
+            "cua-driver list_windows returned no matching windows over MCP (pid=%s); re-fetching via CLI transport", pid))
+        return [w for w in windows if pid is None or w.get("pid") == pid]
+
+    def _discover_app_windows(self, app: Optional[str]) -> List[Dict[str, Any]]:
+        if self.permission_mode != "bounded" or not app or app.strip().lower() in _DESKTOP_SHELL_SENTINELS:
+            return self.list_windows()
+        # App-only grants cannot enumerate the desktop before applying the app filter.
+        pids = set()
+        for candidate in self.list_apps():
+            if not isinstance(candidate, dict) or candidate.get("running") is False:
+                continue
+            aliases = {value.strip().casefold() for key in ("bundle_id", "bundleId", "name", "app_name", "display_name")
+                       if isinstance((value := candidate.get(key)), str) and value.strip()}
+            if app.strip().casefold() in aliases and (pid := _positive_int(candidate.get("pid"))) is not None:
+                pids.add(pid)
+        windows = [window for pid in sorted(pids) for window in self.list_windows(pid=pid)]
+        return sorted(windows, key=lambda w: w["z_index"], reverse=True)
 
     def _match_windows_for_app(self, windows: List[Dict[str, Any]], app: str) -> List[Dict[str, Any]]:
         """Resolve ``app=``: exact window names, then exact list_apps aliases (Linux ``list_windows`` can
@@ -209,8 +228,10 @@ class _CaptureMixin:
             return [{"app_name": app or "", "pid": target_pid, "window_id": target_window_id, "off_screen": False,
                      "title": "", "z_index": 0}]
         with self._disarming():
-            windows = self.list_windows()
+            windows = self._discover_app_windows(app)
         if not windows:
+            if self.permission_mode == "bounded" and app and app.strip().lower() not in _DESKTOP_SHELL_SENTINELS:
+                return self._failed_capture(mode, _NO_APP_MATCH_MSG.format(app=app))
             # Diagnose instead of a bare 0x0: the dominant real-world cause on Linux is a locked desktop session.
             from tools.computer_use import cua_backend as _cb
             return self._failed_capture(mode, _cb._empty_discovery_reason())
@@ -225,6 +246,8 @@ class _CaptureMixin:
             return desktop or self._failed_capture(mode, _NO_DESKTOP_WINDOW_MSG.format(app=app))
         # When the filter matches nothing, say so instead of silently capturing the frontmost window — on
         # macOS list_windows returns the localized app name (e.g. "計算機"), so `app="Calculator"` legitimately misses.
+        if self.permission_mode == "bounded":
+            return windows
         return self._match_windows_for_app(windows, app) or self._failed_capture(mode, _NO_APP_MATCH_MSG.format(app=app))
 
     def _gws_args(self) -> Dict[str, Any]:
@@ -373,7 +396,9 @@ class _CaptureMixin:
         automation never needs to raise a window. ``raise_window=True`` is explicit, separately approved,
         and uses the standalone ``bring_to_front`` tool."""
         with self._disarming():
-            matched = self._match_windows_for_app(self.list_windows(), app)
+            matched = self._discover_app_windows(app)
+            if self.permission_mode != "bounded" or not app.strip() or app.strip().lower() in _DESKTOP_SHELL_SENTINELS:
+                matched = self._match_windows_for_app(matched, app)
         # No silent fallback to the frontmost window: that hides the real failure (often a localized macOS
         # app-name mismatch).
         if not matched:
