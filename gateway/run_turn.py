@@ -1428,7 +1428,10 @@ class GatewayTurnMixin:
 
         # Member-facing profiles may disable operator setup prompts without choosing a delivery home.
         from hermes_cli.config import cfg_get
-        if not human_platform or cfg_get(_load_gateway_config(), "gateway", "home_channel_prompt", default=True) is False:
+        from utils import is_truthy_value
+        if not human_platform or not is_truthy_value(
+            cfg_get(_load_gateway_config(), "gateway", "home_channel_prompt", default=True), default=True,
+        ):
             return
         platform_name = source.platform.value
         env_key = _home_target_env_var(platform_name)
