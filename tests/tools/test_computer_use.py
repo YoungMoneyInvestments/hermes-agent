@@ -1325,12 +1325,15 @@ class TestCaptureAppFilterNoMatch:
         assert backend._active_pid is None
         assert backend._active_window_id is None
 
-    def test_bounded_app_capture_and_focus_use_only_exact_app_pid(self):
+    @pytest.mark.parametrize("identity", [{"bundle_id": "com.hnc.Discord"},
+                                         {"bundleId": "com.hnc.Discord"},
+                                         {"display_name": "com.hnc.Discord"}])
+    def test_bounded_app_capture_and_focus_use_only_exact_app_pid(self, identity):
         windows = [
             {"app_name": "Other", "pid": 100, "window_id": 1, "is_on_screen": True, "z_index": 20},
-            {"app_name": "Discord", "pid": 200, "window_id": 2, "is_on_screen": True, "z_index": 1},
+            {"app_name": "Discord", "pid": 200, "window_id": 2, "is_on_screen": True},
         ]
-        apps = [{"name": "Discord", "bundle_id": "com.hnc.Discord", "pid": 200, "running": True}]
+        apps = [{"name": "Discord", **identity, "pid": 200, "running": True}]
         for operation in ("capture", "focus"):
             backend = _make_cua_backend_with_windows_and_apps(windows, apps)
             backend.permission_mode = "bounded"
