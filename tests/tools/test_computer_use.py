@@ -1351,8 +1351,10 @@ class TestCaptureAppFilterNoMatch:
             assert not result.elements and backend._active_pid is None
             assert not any(call.args[0] == "list_windows" for call in backend._session.call_tool.call_args_list)
 
-    def test_pid_window_refetch_retains_scope_and_rejects_other_process_rows(self):
-        backend = _make_cua_backend_with_windows([])
+    @pytest.mark.parametrize("mcp_windows", [[], [
+        {"app_name": "Other", "pid": 100, "window_id": 1, "is_on_screen": True, "z_index": 20}]])
+    def test_pid_window_refetch_retains_scope_and_rejects_other_process_rows(self, mcp_windows):
+        backend = _make_cua_backend_with_windows(mcp_windows)
         backend._session._call_tool_via_cli.return_value = {"isError": False, "structuredContent": {"windows": [
             {"app_name": "Discord", "pid": 200, "window_id": 2, "is_on_screen": True, "z_index": 1},
             {"app_name": "Other", "pid": 100, "window_id": 1, "is_on_screen": True, "z_index": 20}]}}

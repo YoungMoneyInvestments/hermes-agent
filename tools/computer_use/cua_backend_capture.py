@@ -162,7 +162,7 @@ class _CaptureMixin:
             args["pid"] = pid
         windows = _sorted_windows(self._fetch_or_refetch(
             "list_windows", args, 20.0, "list_windows",
-            lambda out: not _sorted_windows(out),
+            lambda out: not any(pid is None or w.get("pid") == pid for w in _sorted_windows(out)),
             "cua-driver list_windows returned no windows over MCP; re-fetching via CLI transport"))
         return [w for w in windows if pid is None or w.get("pid") == pid]
 
