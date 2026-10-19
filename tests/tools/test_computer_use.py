@@ -1325,6 +1325,42 @@ class TestCaptureAppFilterNoMatch:
         assert backend._active_pid is None
         assert backend._active_window_id is None
 
+    def test_bounded_app_capture_and_focus_use_only_exact_app_pid(self):
+        windows = [
+            {"app_name": "Other", "pid": 100, "window_id": 1, "is_on_screen": True, "z_index": 20},
+            {"app_name": "Discord", "pid": 200, "window_id": 2, "is_on_screen": True, "z_index": 1},
+        ]
+        apps = [{"name": "Discord", "bundle_id": "com.hnc.Discord", "pid": 200, "running": True}]
+        for operation in ("capture", "focus"):
+            backend = _make_cua_backend_with_windows_and_apps(windows, apps)
+            backend.permission_mode = "bounded"
+            if operation == "capture":
+                backend.capture(mode="ax", app="com.hnc.Discord")
+            else:
+                assert backend.focus_app("com.hnc.Discord").ok
+            assert backend._active_pid == 200
+            reads = [call.args[1] for call in backend._session.call_tool.call_args_list if call.args[0] == "list_windows"]
+            assert reads and all(args["pid"] == 200 for args in reads)
+
+    def test_bounded_app_discovery_never_falls_back_to_global_or_fuzzy_windows(self):
+        for apps in ([], [{"name": "Discord", "bundle_id": "com.hnc.Discord", "pid": 200, "running": False}],
+                     [{"name": "Other Discord", "bundle_id": "com.other.Discord", "pid": 300, "running": True}]):
+            backend = _make_cua_backend_with_windows_and_apps([], apps)
+            backend.permission_mode = "bounded"
+            result = backend.capture(mode="ax", app="com.hnc.Discord")
+            assert not result.elements and backend._active_pid is None
+            assert not any(call.args[0] == "list_windows" for call in backend._session.call_tool.call_args_list)
+
+    def test_pid_window_refetch_retains_scope_and_rejects_other_process_rows(self):
+        backend = _make_cua_backend_with_windows([])
+        backend._session._call_tool_via_cli.return_value = {"isError": False, "structuredContent": {"windows": [
+            {"app_name": "Discord", "pid": 200, "window_id": 2, "is_on_screen": True, "z_index": 1},
+            {"app_name": "Other", "pid": 100, "window_id": 1, "is_on_screen": True, "z_index": 20}]}}
+        windows = backend.list_windows(pid=200)
+        assert [w["pid"] for w in windows] == [200]
+        assert backend._session.call_tool.call_args.args[1]["pid"] == 200
+        assert backend._session._call_tool_via_cli.call_args.args[1]["pid"] == 200
+
     @pytest.mark.platforms("linux")
     def test_linux_default_capture_skips_gnome_shell_helper(self):
         windows = [
