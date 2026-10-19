@@ -978,6 +978,25 @@ def _make_cua_backend_with_tool_result(result: Dict[str, Any]):
 
 
 class TestCuaDriverWindowResultShapes:
+    @pytest.mark.parametrize("action", ["list_apps", "capture", "focus_app"])
+    def test_app_inventory_logical_error_raises_and_disarms_without_fallback(self, action):
+        backend = _make_cua_backend_with_tool_result({
+            "isError": True, "data": "Policy loading error: capability manifest idle timeout exceeded",
+            "structuredContent": {"apps": [{"name": "Discord", "bundle_id": "com.hnc.Discord", "pid": 100}]},
+        })
+        backend.permission_mode = "bounded"
+        backend._active_pid, backend._active_window_id = 100, 7
+        with pytest.raises(RuntimeError, match="capability manifest idle timeout exceeded"):
+            if action == "list_apps":
+                backend.list_apps()
+            elif action == "capture":
+                backend.capture(mode="ax", app="com.hnc.Discord")
+            else:
+                backend.focus_app("com.hnc.Discord")
+        assert backend._active_pid is None and backend._active_window_id is None
+        assert all(call.args[0] == "list_apps" for call in backend._session.call_tool.call_args_list)
+        backend._session._call_tool_via_cli.assert_not_called()
+
     def test_list_apps_derives_apps_from_data_windows_shape(self):
         windows = [
             {"app_name": "Terminal", "pid": 100, "window_id": 7},
