@@ -1344,6 +1344,7 @@ class TestCaptureAppFilterNoMatch:
             assert backend._active_pid == 200
             reads = [call.args[1] for call in backend._session.call_tool.call_args_list if call.args[0] == "list_windows"]
             assert reads and all(args["pid"] == 200 for args in reads)
+            assert sum(call.args[0] == "list_apps" for call in backend._session.call_tool.call_args_list) == 1
 
     def test_bounded_app_discovery_never_falls_back_to_global_or_fuzzy_windows(self):
         for apps in ([], [{"name": "Discord", "bundle_id": "com.hnc.Discord", "pid": 200, "running": False}],
@@ -1352,7 +1353,33 @@ class TestCaptureAppFilterNoMatch:
             backend.permission_mode = "bounded"
             result = backend.capture(mode="ax", app="com.hnc.Discord")
             assert not result.elements and backend._active_pid is None
+            assert "com.hnc.Discord" in result.window_title
             assert not any(call.args[0] == "list_windows" for call in backend._session.call_tool.call_args_list)
+
+    def test_bounded_inventory_transport_error_disarms_and_preserves_error(self):
+        for operation in ("capture", "focus"):
+            backend = _make_cua_backend_with_windows_and_apps([], [])
+            backend.permission_mode = "bounded"
+            backend._active_pid = 99
+            backend._active_window_id = 88
+            backend._session.call_tool.side_effect = RuntimeError("inventory unavailable")
+            with pytest.raises(RuntimeError, match="inventory unavailable"):
+                if operation == "capture":
+                    backend.capture(mode="ax", app="com.hnc.Discord")
+                else:
+                    backend.focus_app("com.hnc.Discord")
+            assert backend._active_pid is None and backend._active_window_id is None
+            assert all(call.args[0] == "list_apps" for call in backend._session.call_tool.call_args_list)
+
+    def test_real_bounded_constructor_retains_mode_and_manifest(self, tmp_path):
+        from tools.computer_use.cua_backend import CuaDriverBackend
+        manifest = tmp_path / "discord.yaml"
+        manifest.write_text("version: 3\nresources:\n  apps:\n    - bundle_id: com.hnc.Discord\n")
+        with patch("tools.computer_use.cua_backend._computer_use_cfg", return_value={"capability_manifest": str(manifest)}):
+            backend = CuaDriverBackend(permission_mode="bounded")
+        assert backend.permission_mode == "bounded"
+        assert backend._embedded_daemon.permission_mode == "bounded"
+        assert backend._embedded_daemon.capability_manifest == str(manifest)
 
     @pytest.mark.parametrize("mcp_windows", [[], [
         {"app_name": "Other", "pid": 100, "window_id": 1, "is_on_screen": True, "z_index": 20}]])

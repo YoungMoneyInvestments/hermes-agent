@@ -230,6 +230,8 @@ class _CaptureMixin:
         with self._disarming():
             windows = self._discover_app_windows(app)
         if not windows:
+            if self.permission_mode == "bounded" and app and app.strip().lower() not in _DESKTOP_SHELL_SENTINELS:
+                return self._failed_capture(mode, _NO_APP_MATCH_MSG.format(app=app))
             # Diagnose instead of a bare 0x0: the dominant real-world cause on Linux is a locked desktop session.
             from tools.computer_use import cua_backend as _cb
             return self._failed_capture(mode, _cb._empty_discovery_reason())
@@ -244,6 +246,8 @@ class _CaptureMixin:
             return desktop or self._failed_capture(mode, _NO_DESKTOP_WINDOW_MSG.format(app=app))
         # When the filter matches nothing, say so instead of silently capturing the frontmost window — on
         # macOS list_windows returns the localized app name (e.g. "計算機"), so `app="Calculator"` legitimately misses.
+        if self.permission_mode == "bounded":
+            return windows
         return self._match_windows_for_app(windows, app) or self._failed_capture(mode, _NO_APP_MATCH_MSG.format(app=app))
 
     def _gws_args(self) -> Dict[str, Any]:
@@ -392,7 +396,9 @@ class _CaptureMixin:
         automation never needs to raise a window. ``raise_window=True`` is explicit, separately approved,
         and uses the standalone ``bring_to_front`` tool."""
         with self._disarming():
-            matched = self._match_windows_for_app(self._discover_app_windows(app), app)
+            matched = self._discover_app_windows(app)
+            if self.permission_mode != "bounded" or not app.strip() or app.strip().lower() in _DESKTOP_SHELL_SENTINELS:
+                matched = self._match_windows_for_app(matched, app)
         # No silent fallback to the frontmost window: that hides the real failure (often a localized macOS
         # app-name mismatch).
         if not matched:
