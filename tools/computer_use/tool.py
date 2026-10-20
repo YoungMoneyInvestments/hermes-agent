@@ -21,7 +21,7 @@ from functools import partial
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from tools.computer_use.backend import ActionResult, CaptureResult, ComputerUseBackend, UIElement, image_dimensions_from_bytes
+from tools.computer_use.backend import ActionResult, CaptureResult, ComputerUseBackend, UIElement, image_dimensions_from_bytes, valid_pixel_point
 
 logger = logging.getLogger(__name__)
 
@@ -437,6 +437,15 @@ def _do_drag(backend, action, args, **delivery):
                         from_xy=tuple(src) if src else None, to_xy=tuple(dst) if dst else None,
                         button=args.get("button", "left"), modifiers=args.get("modifiers"), **delivery)
 
+def _do_type(backend, action, args, **delivery):
+    point = args.get("coordinate")
+    if "coordinate" in args:
+        if not valid_pixel_point(point):
+            return json.dumps({"ok": False, "code": "invalid_coordinate", "error": "Pixel typing requires two bounded integer coordinates."})
+        return backend.type_text(args.get("text", ""), x=point[0], y=point[1], **delivery)
+    return backend.type_text(args.get("text", ""), **delivery)
+
+
 def _do_scroll(backend, action, args, **delivery):
     return backend.scroll(direction=args.get("direction", "down"), amount=int(args.get("amount", 3)),
                           element=args.get("element"), **_scroll_xy(args), modifiers=args.get("modifiers"), **delivery)
@@ -472,7 +481,7 @@ _ACTIONS: Dict[str, _ActionSpec] = {
     "drag": _input(_do_drag, summarize=lambda a, args, fg: (f"drag {args.get('from_element') or args.get('from_coordinate')} → "
                                                              f"{args.get('to_element') or args.get('to_coordinate')}{fg}")),
     "scroll": _input(_do_scroll, summarize=lambda a, args, fg: f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}{fg}"),
-    "type": _input(lambda backend, action, args, **delivery: backend.type_text(args.get("text", ""), **delivery),
+    "type": _input(_do_type,
                    summarize=lambda a, args, fg: f"type {args.get('text', '')[:60]!r}" + ("..." if len(args.get("text", "")) > 60 else "") + fg),
     "key": _input(lambda backend, action, args, **delivery: backend.key(args.get("keys", ""), **delivery),
                   summarize=lambda a, args, fg: f"key {args.get('keys', '')!r}{fg}"),
