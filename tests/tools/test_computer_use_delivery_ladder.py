@@ -428,7 +428,7 @@ def test_input_uses_explicit_exact_window_target_when_supported():
     assert be.key("return").ok
     for name, args in session.calls:
         assert args["target"] == {"kind": "window", "pid": 4242, "window_id": 7}
-        assert args["pid"] == 4242 and args["window_id"] == 7
+        assert not ({"pid", "window_id", "scope"} & args.keys())
 
 
 def test_input_preserves_legacy_target_when_selector_is_unsupported():
