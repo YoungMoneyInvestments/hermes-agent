@@ -41,6 +41,11 @@ def image_dimensions_from_bytes(raw: bytes) -> Optional[Tuple[int, int]]:
     return None
 
 
+def valid_pixel_point(point) -> bool:
+    return (isinstance(point, (list, tuple)) and len(point) == 2
+            and all(type(v) is int and 0 <= v <= 32767 for v in point))
+
+
 @dataclass
 class UIElement:
     """One interactable element on the current screen."""

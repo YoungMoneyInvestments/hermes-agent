@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-from tools.computer_use.backend import ActionResult
+from tools.computer_use.backend import ActionResult, valid_pixel_point
 from tools.computer_use.cua_backend_parse import _parse_key_combo
 
 _NO_TARGET_MSG = "No active window — call capture() first."
@@ -150,7 +150,7 @@ class _InputMixin:
         if refusal is not None:
             return refusal
         if x is not None or y is not None:
-            if any(type(v) is not int or not 0 <= v <= 32767 for v in (x, y)):
+            if not valid_pixel_point((x, y)):
                 return _refuse("type_text", "Pixel typing requires two bounded integer coordinates.")
             if not all(self._session.supports_input_property("type_text", k) for k in ("x", "y")):
                 return _refuse("type_text", "The connected driver does not support pixel typing.", code="pixel_typing_unsupported")

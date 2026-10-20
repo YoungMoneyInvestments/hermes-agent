@@ -398,3 +398,12 @@ def test_type_dispatch_refuses_invalid_supplied_coordinate(point):
     result = _ACTIONS["type"].handler(backend, "type", {"text": "body", "coordinate": point})
     assert "error" in json.loads(result)
     backend.type_text.assert_not_called()
+
+
+@pytest.mark.parametrize("delivery", [{}, {"delivery_mode": None}, {"delivery_mode": "foreground", "bring_to_front": True}])
+def test_type_dispatch_without_coordinates_preserves_delivery(delivery):
+    from tools.computer_use.tool import _ACTIONS
+    from unittest.mock import Mock
+    backend = Mock()
+    _ACTIONS["type"].handler(backend, "type", {"text": "body"}, **delivery)
+    backend.type_text.assert_called_once_with("body", **delivery)

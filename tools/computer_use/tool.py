@@ -21,7 +21,7 @@ from functools import partial
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from tools.computer_use.backend import ActionResult, CaptureResult, ComputerUseBackend, UIElement, image_dimensions_from_bytes
+from tools.computer_use.backend import ActionResult, CaptureResult, ComputerUseBackend, UIElement, image_dimensions_from_bytes, valid_pixel_point
 
 logger = logging.getLogger(__name__)
 
@@ -440,9 +440,8 @@ def _do_drag(backend, action, args, **delivery):
 def _do_type(backend, action, args, **delivery):
     point = args.get("coordinate")
     if "coordinate" in args:
-        if (not isinstance(point, (list, tuple)) or len(point) != 2
-                or any(type(v) is not int or not 0 <= v <= 32767 for v in point)):
-            return json.dumps({"error": "Pixel typing requires two bounded integer coordinates."})
+        if not valid_pixel_point(point):
+            return json.dumps({"ok": False, "code": "invalid_coordinate", "error": "Pixel typing requires two bounded integer coordinates."})
         return backend.type_text(args.get("text", ""), x=point[0], y=point[1], **delivery)
     return backend.type_text(args.get("text", ""), **delivery)
 
