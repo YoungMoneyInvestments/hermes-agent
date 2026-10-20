@@ -428,7 +428,25 @@ def test_input_uses_explicit_exact_window_target_when_supported():
     assert be.key("return").ok
     for name, args in session.calls:
         assert args["target"] == {"kind": "window", "pid": 4242, "window_id": 7}
-        assert args["pid"] == 4242 and args["window_id"] == 7
+        assert not ({"pid", "window_id", "scope"} & args.keys())
+
+
+def test_explicit_window_translation_removes_legacy_scope():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"click": {"target"}})
+    be = _make_backend(session)
+    original = {"pid": 4242, "window_id": 7, "scope": "window", "x": 100, "y": 200}
+    assert be._action("click", original).ok
+    assert original == {"pid": 4242, "window_id": 7, "scope": "window", "x": 100, "y": 200}
+    assert session.last_args["target"] == {"kind": "window", "pid": 4242, "window_id": 7}
+    assert not ({"pid", "window_id", "scope"} & session.last_args.keys())
+
+
+def test_input_keeps_unknown_scope_for_driver_validation():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"click": {"target"}})
+    be = _make_backend(session)
+    assert be._action("click", {"pid": 4242, "window_id": 7, "scope": "element"}).ok
+    assert "target" not in session.last_args
+    assert session.last_args["scope"] == "element"
 
 
 def test_input_preserves_legacy_target_when_selector_is_unsupported():
@@ -453,5 +471,14 @@ def test_exact_input_target_is_not_added_to_standalone_focus():
 def test_exact_input_target_preserves_explicit_target_argument():
     session = _FakeSession({"isError": False, "data": {}}, input_properties={"type_text": {"target"}})
     be = _make_backend(session)
-    assert be._action("type_text", {"pid": 4242, "window_id": 7, "target": None, "text": "body"}).ok
-    assert session.last_args["target"] is None
+    target = {"kind": "window", "pid": 4242, "window_id": 7}
+    assert be._action("type_text", {"target": target, "text": "body"}).ok
+    assert session.last_args["target"] == target
+
+
+def test_null_target_uses_captured_window_without_legacy_fields():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"click": {"target"}})
+    be = _make_backend(session)
+    assert be._action("click", {"pid": 4242, "window_id": 7, "scope": "window", "target": None}).ok
+    assert session.last_args["target"] == {"kind": "window", "pid": 4242, "window_id": 7}
+    assert not ({"pid", "window_id", "scope"} & session.last_args.keys())
