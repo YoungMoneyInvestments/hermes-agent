@@ -523,3 +523,13 @@ def test_element_typing_requires_live_schema_support():
     result = be.type_text("body", element=2)
     assert not result.ok and result.code == "element_typing_unsupported"
     assert not session.calls
+
+
+def test_element_dispatch_works_with_noop_backend_and_json_response():
+    from tools.computer_use.tool import _NoopBackend, _dispatch
+    backend = _NoopBackend()
+    result = json.loads(_dispatch(backend, "type", {"element": 2, "text": "query"}))
+    assert result["ok"] is True
+    assert backend.calls[0][0] == "type"
+    assert backend.calls[0][1]["element"] == 2
+    assert backend.calls[0][1]["text"] == "query"
