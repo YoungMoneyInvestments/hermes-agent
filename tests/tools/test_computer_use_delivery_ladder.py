@@ -489,6 +489,7 @@ def test_exact_element_typing_keeps_snapshot_token_and_foreground():
     be = _make_backend(session)
     be._snapshot_tokens = {2: "fresh-query-token"}
     assert be.type_text("@Cami#1110", element=2, delivery_mode="foreground").ok
+    assert session.last_args["text"] == "@Cami#1110"
     assert session.last_args["element_index"] == 2
     assert session.last_args["element_token"] == "fresh-query-token"
     assert session.last_args["target"] == {"kind": "window", "pid": 4242, "window_id": 7}
@@ -514,3 +515,11 @@ def test_element_typing_dispatch_forwards_exact_field():
     result = _do_type(backend, "type", {"element": 2, "coordinate": [10,20], "text": "query"})
     assert json.loads(result)["code"] == "invalid_element"
     backend.type_text.assert_not_called()
+
+
+def test_element_typing_requires_live_schema_support():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"type_text": set()})
+    be = _make_backend(session)
+    result = be.type_text("body", element=2)
+    assert not result.ok and result.code == "element_typing_unsupported"
+    assert not session.calls

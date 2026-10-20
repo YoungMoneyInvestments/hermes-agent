@@ -151,7 +151,7 @@ class _InputMixin:
             return refusal
         if element is not None:
             if type(element) is not int or element < 1 or x is not None or y is not None:
-                return _refuse("type_text", "Use one positive element index or pixel coordinates, never both.")
+                return _refuse("type_text", "Use one positive element index or pixel coordinates, never both.", code="invalid_element")
             if not self._session.supports_input_property("type_text", "element_index"):
                 return _refuse("type_text", "The connected driver does not support element typing.", code="element_typing_unsupported")
             args["element_index"] = element
