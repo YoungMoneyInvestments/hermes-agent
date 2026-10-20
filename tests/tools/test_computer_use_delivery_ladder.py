@@ -482,3 +482,64 @@ def test_null_target_uses_captured_window_without_legacy_fields():
     assert be._action("click", {"pid": 4242, "window_id": 7, "scope": "window", "target": None}).ok
     assert session.last_args["target"] == {"kind": "window", "pid": 4242, "window_id": 7}
     assert not ({"pid", "window_id", "scope"} & session.last_args.keys())
+
+
+def test_exact_element_typing_keeps_snapshot_token_and_foreground():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"type_text": {"element_index", "element_token", "delivery_mode", "target"}})
+    be = _make_backend(session)
+    be._snapshot_tokens = {2: "fresh-query-token"}
+    assert be.type_text("@Cami#1110", element=2, delivery_mode="foreground").ok
+    assert session.last_args["text"] == "@Cami#1110"
+    assert session.last_args["element_index"] == 2
+    assert session.last_args["element_token"] == "fresh-query-token"
+    assert session.last_args["target"] == {"kind": "window", "pid": 4242, "window_id": 7}
+    assert session.last_args["delivery_mode"] == "foreground"
+    assert "x" not in session.last_args and "y" not in session.last_args
+
+
+def test_element_typing_refuses_bad_or_mixed_addresses():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"type_text": {"element_index"}})
+    be = _make_backend(session)
+    for element, x in ((0,None), (True,None), (-1,None), ("2",None), (2,10)):
+        assert not be.type_text("body", element=element, x=x).ok
+    assert not session.calls
+
+
+def test_element_typing_dispatch_forwards_exact_field():
+    from unittest.mock import Mock
+    from tools.computer_use.tool import _do_type
+    backend = Mock()
+    _do_type(backend, "type", {"element": 2, "text": "query"}, delivery_mode="foreground")
+    backend.type_text.assert_called_once_with("query", element=2, delivery_mode="foreground")
+    backend.reset_mock()
+    result = _do_type(backend, "type", {"element": 2, "coordinate": [10,20], "text": "query"})
+    assert json.loads(result)["code"] == "invalid_element"
+    backend.type_text.assert_not_called()
+
+
+def test_element_typing_requires_live_schema_support():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"type_text": set()})
+    be = _make_backend(session)
+    result = be.type_text("body", element=2)
+    assert not result.ok and result.code == "element_typing_unsupported"
+    assert not session.calls
+
+
+def test_element_dispatch_works_with_noop_backend_and_json_response():
+    from tools.computer_use.tool import _NoopBackend, _dispatch
+    backend = _NoopBackend()
+    result = json.loads(_dispatch(backend, "type", {"element": 2, "text": "query"}))
+    assert result["ok"] is True
+    assert backend.calls[0][0] == "type"
+    assert backend.calls[0][1]["element"] == 2
+    assert backend.calls[0][1]["text"] == "query"
+
+
+@pytest.mark.parametrize("properties,tokens", [({"element_index", "element_token"}, {}), ({"element_index"}, {2: "token"})])
+def test_element_typing_requires_a_deliverable_fresh_token(properties, tokens):
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"type_text": properties})
+    be = _make_backend(session)
+    be._snapshot_tokens = tokens
+    result = be.type_text("body", element=2)
+    assert not result.ok and result.code == "stale_element"
+    assert not session.calls

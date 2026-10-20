@@ -439,6 +439,11 @@ def _do_drag(backend, action, args, **delivery):
 
 def _do_type(backend, action, args, **delivery):
     point = args.get("coordinate")
+    element = args.get("element")
+    if element is not None:
+        if type(element) is not int or element < 1 or any(k in args for k in ("coordinate", "x", "y")):
+            return json.dumps({"ok": False, "code": "invalid_element", "error": "Use one positive element index or pixel coordinates, never both."})
+        return backend.type_text(args.get("text", ""), element=element, **delivery)
     if "coordinate" in args:
         if not valid_pixel_point(point):
             return json.dumps({"ok": False, "code": "invalid_coordinate", "error": "Pixel typing requires two bounded integer coordinates."})
