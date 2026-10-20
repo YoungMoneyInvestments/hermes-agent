@@ -533,3 +533,13 @@ def test_element_dispatch_works_with_noop_backend_and_json_response():
     assert backend.calls[0][0] == "type"
     assert backend.calls[0][1]["element"] == 2
     assert backend.calls[0][1]["text"] == "query"
+
+
+@pytest.mark.parametrize("properties,tokens", [({"element_index", "element_token"}, {}), ({"element_index"}, {2: "token"})])
+def test_element_typing_requires_a_deliverable_fresh_token(properties, tokens):
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"type_text": properties})
+    be = _make_backend(session)
+    be._snapshot_tokens = tokens
+    result = be.type_text("body", element=2)
+    assert not result.ok and result.code == "stale_element"
+    assert not session.calls
