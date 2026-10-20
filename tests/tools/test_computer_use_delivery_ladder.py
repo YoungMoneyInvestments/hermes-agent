@@ -418,3 +418,22 @@ def test_pixel_typing_accepts_coordinate_boundaries(point):
     be = _make_backend(session)
     assert be.type_text("body", x=point[0], y=point[1]).ok
     assert session.calls == [("type_text", {"pid": 4242, "window_id": 7, "x": point[0], "y": point[1], "text": "body", "session": "test-run"})]
+
+
+def test_input_uses_explicit_exact_window_target_when_supported():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"click": {"target"}, "type_text": {"x", "y", "target"}, "press_key": {"target"}})
+    be = _make_backend(session)
+    assert be.click(x=100, y=200).ok
+    assert be.type_text("body", x=100, y=200).ok
+    assert be.key("return").ok
+    for name, args in session.calls:
+        assert args["target"] == {"kind": "window", "pid": 4242, "window_id": 7}
+        assert args["pid"] == 4242 and args["window_id"] == 7
+
+
+def test_input_preserves_legacy_target_when_selector_is_unsupported():
+    session = _FakeSession({"isError": False, "data": {}})
+    be = _make_backend(session)
+    assert be.click(x=100, y=200).ok
+    assert "target" not in session.last_args
+    assert session.last_args["pid"] == 4242 and session.last_args["window_id"] == 7
