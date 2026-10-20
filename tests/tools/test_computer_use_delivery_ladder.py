@@ -418,3 +418,40 @@ def test_pixel_typing_accepts_coordinate_boundaries(point):
     be = _make_backend(session)
     assert be.type_text("body", x=point[0], y=point[1]).ok
     assert session.calls == [("type_text", {"pid": 4242, "window_id": 7, "x": point[0], "y": point[1], "text": "body", "session": "test-run"})]
+
+
+def test_input_uses_explicit_exact_window_target_when_supported():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"click": {"target"}, "type_text": {"x", "y", "target"}, "press_key": {"target"}})
+    be = _make_backend(session)
+    assert be.click(x=100, y=200).ok
+    assert be.type_text("body", x=100, y=200).ok
+    assert be.key("return").ok
+    for name, args in session.calls:
+        assert args["target"] == {"kind": "window", "pid": 4242, "window_id": 7}
+        assert args["pid"] == 4242 and args["window_id"] == 7
+
+
+def test_input_preserves_legacy_target_when_selector_is_unsupported():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"type_text": {"x", "y"}})
+    be = _make_backend(session)
+    assert be.click(x=100, y=200).ok
+    assert be.type_text("body", x=100, y=200).ok
+    assert be.key("return").ok
+    assert [name for name, args in session.calls] == ["click", "type_text", "press_key"]
+    for name, args in session.calls:
+        assert "target" not in args
+        assert args["pid"] == 4242 and args["window_id"] == 7
+
+
+def test_exact_input_target_is_not_added_to_standalone_focus():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"bring_to_front": {"target"}})
+    be = _make_backend(session)
+    assert be.bring_to_front(pid=4242, window_id=7).ok
+    assert session.calls == [("bring_to_front", {"pid": 4242, "window_id": 7})]
+
+
+def test_exact_input_target_preserves_explicit_target_argument():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"type_text": {"target"}})
+    be = _make_backend(session)
+    assert be._action("type_text", {"pid": 4242, "window_id": 7, "target": None, "text": "body"}).ok
+    assert session.last_args["target"] is None
