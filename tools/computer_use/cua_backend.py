@@ -408,8 +408,10 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
         # bare `element_index` (`snapshot_id_required`) — gating on the capability alone broke EVERY element click and
         # left only pixel clicks working. The capability check stays so older drivers that shipped the vocabulary keep
         # working; drivers advertising neither (`additionalProperties: false`) must never see the property.
+        args = dict(args)
         if (name in {"click", "double_click", "type_text", "press_key", "hotkey", "scroll", "drag", "set_value"}
                 and "pid" in args and "window_id" in args and "target" not in args
+                and args.get("scope") in (None, "window")
                 and self._session.supports_input_property(name, "target")):
             args["target"] = {"kind": "window", "pid": args.pop("pid"), "window_id": args.pop("window_id")}
             args.pop("scope", None)

@@ -434,9 +434,19 @@ def test_input_uses_explicit_exact_window_target_when_supported():
 def test_explicit_window_translation_removes_legacy_scope():
     session = _FakeSession({"isError": False, "data": {}}, input_properties={"click": {"target"}})
     be = _make_backend(session)
-    assert be._action("click", {"pid": 4242, "window_id": 7, "scope": "window", "x": 100, "y": 200}).ok
+    original = {"pid": 4242, "window_id": 7, "scope": "window", "x": 100, "y": 200}
+    assert be._action("click", original).ok
+    assert original == {"pid": 4242, "window_id": 7, "scope": "window", "x": 100, "y": 200}
     assert session.last_args["target"] == {"kind": "window", "pid": 4242, "window_id": 7}
     assert not ({"pid", "window_id", "scope"} & session.last_args.keys())
+
+
+def test_input_keeps_unknown_scope_for_driver_validation():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"click": {"target"}})
+    be = _make_backend(session)
+    assert be._action("click", {"pid": 4242, "window_id": 7, "scope": "element"}).ok
+    assert "target" not in session.last_args
+    assert session.last_args["scope"] == "element"
 
 
 def test_input_preserves_legacy_target_when_selector_is_unsupported():
