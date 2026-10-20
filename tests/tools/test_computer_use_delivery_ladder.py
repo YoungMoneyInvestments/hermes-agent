@@ -364,3 +364,37 @@ def test_call_tool_restarts_a_dead_session(monkeypatch):
 
     sess.call_tool("click", {"pid": 1})
     assert started["count"] == 1, "dead session should have been restarted once"
+
+
+def test_pixel_typing_is_atomic_and_keeps_exact_window():
+    session = _FakeSession({"isError": False, "data": {"message": "ok"}}, input_properties={"type_text": {"x", "y", "delivery_mode"}})
+    be = _make_backend(session)
+    assert be.type_text("@Cami#1110", x=679, y=257, delivery_mode="foreground").ok
+    assert session.calls == [("type_text", {"pid": 4242, "window_id": 7, "text": "@Cami#1110", "x": 679, "y": 257, "delivery_mode": "foreground", "session": "test-run"})]
+
+
+def test_pixel_typing_refuses_unsupported_or_invalid_coordinates():
+    session = _FakeSession({})
+    be = _make_backend(session)
+    assert be.type_text("body", x=1, y=2).code == "pixel_typing_unsupported"
+    for x, y in ((True, 2), (1, None), (-1, 2), (1, 32768)):
+        assert not be.type_text("body", x=x, y=y).ok
+    assert session.calls == []
+
+
+def test_type_dispatch_preserves_pixel_coordinates():
+    from tools.computer_use.tool import _ACTIONS
+    from unittest.mock import Mock
+    backend = Mock()
+    _ACTIONS["type"].handler(backend, "type", {"text": "body", "coordinate": [12, 34]}, delivery_mode="foreground")
+    backend.type_text.assert_called_once_with("body", x=12, y=34, delivery_mode="foreground")
+
+
+@pytest.mark.parametrize("point", [None, [], [None, 2], [1], [1, 2, 3], [True, 2], [1, -1]])
+def test_type_dispatch_refuses_invalid_supplied_coordinate(point):
+    from tools.computer_use.tool import _ACTIONS
+    from unittest.mock import Mock
+    backend = Mock()
+    result = _ACTIONS["type"].handler(backend, "type", {"text": "body", "coordinate": point})
+    assert "error" in json.loads(result)
+    backend.type_text.assert_not_called()

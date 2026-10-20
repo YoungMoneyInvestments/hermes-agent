@@ -149,7 +149,7 @@ class ComputerUseBackend(ABC):
                delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult: ...
 
     @abstractmethod
-    def type_text(self, text: str, *, delivery_mode: Optional[str] = None,
+    def type_text(self, text: str, *, x: Optional[int] = None, y: Optional[int] = None, delivery_mode: Optional[str] = None,
                   bring_to_front: bool = False) -> ActionResult: ...
 
     @abstractmethod

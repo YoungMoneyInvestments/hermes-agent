@@ -145,10 +145,17 @@ class _InputMixin:
         ), None)
         return refusal if refusal is not None else self._run_input_action("scroll", args, delivery_mode, bring_to_front)
 
-    def type_text(self, text: str, *, delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult:
+    def type_text(self, text: str, *, x: Optional[int] = None, y: Optional[int] = None, delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult:
         refusal, args = self._target_args("type_text", need_window=True)
-        return refusal if refusal is not None else self._run_input_action("type_text", {**args, "text": text},
-                                                                          delivery_mode, bring_to_front)
+        if refusal is not None:
+            return refusal
+        if x is not None or y is not None:
+            if any(type(v) is not int or not 0 <= v <= 32767 for v in (x, y)):
+                return _refuse("type_text", "Pixel typing requires two bounded integer coordinates.")
+            if not all(self._session.supports_input_property("type_text", k) for k in ("x", "y")):
+                return _refuse("type_text", "The connected driver does not support pixel typing.", code="pixel_typing_unsupported")
+            args.update(x=x, y=y)
+        return self._run_input_action("type_text", {**args, "text": text}, delivery_mode, bring_to_front)
 
     def key(self, keys: str, *, delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult:
         refusal, args = self._target_args("key", need_window=True)
