@@ -145,10 +145,16 @@ class _InputMixin:
         ), None)
         return refusal if refusal is not None else self._run_input_action("scroll", args, delivery_mode, bring_to_front)
 
-    def type_text(self, text: str, *, x: Optional[int] = None, y: Optional[int] = None, delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult:
+    def type_text(self, text: str, *, element: Optional[int] = None, x: Optional[int] = None, y: Optional[int] = None, delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult:
         refusal, args = self._target_args("type_text", need_window=True)
         if refusal is not None:
             return refusal
+        if element is not None:
+            if type(element) is not int or element < 1 or x is not None or y is not None:
+                return _refuse("type_text", "Use one positive element index or pixel coordinates, never both.")
+            if not self._session.supports_input_property("type_text", "element_index"):
+                return _refuse("type_text", "The connected driver does not support element typing.", code="element_typing_unsupported")
+            args["element_index"] = element
         if x is not None or y is not None:
             if not valid_pixel_point((x, y)):
                 return _refuse("type_text", "Pixel typing requires two bounded integer coordinates.")
