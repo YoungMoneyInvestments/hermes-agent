@@ -471,5 +471,14 @@ def test_exact_input_target_is_not_added_to_standalone_focus():
 def test_exact_input_target_preserves_explicit_target_argument():
     session = _FakeSession({"isError": False, "data": {}}, input_properties={"type_text": {"target"}})
     be = _make_backend(session)
-    assert be._action("type_text", {"pid": 4242, "window_id": 7, "target": None, "text": "body"}).ok
-    assert session.last_args["target"] is None
+    target = {"kind": "window", "pid": 4242, "window_id": 7}
+    assert be._action("type_text", {"target": target, "text": "body"}).ok
+    assert session.last_args["target"] == target
+
+
+def test_null_target_uses_captured_window_without_legacy_fields():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"click": {"target"}})
+    be = _make_backend(session)
+    assert be._action("click", {"pid": 4242, "window_id": 7, "scope": "window", "target": None}).ok
+    assert session.last_args["target"] == {"kind": "window", "pid": 4242, "window_id": 7}
+    assert not ({"pid", "window_id", "scope"} & session.last_args.keys())

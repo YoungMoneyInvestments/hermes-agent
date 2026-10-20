@@ -410,7 +410,7 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
         # working; drivers advertising neither (`additionalProperties: false`) must never see the property.
         args = dict(args)
         if (name in {"click", "double_click", "type_text", "press_key", "hotkey", "scroll", "drag", "set_value"}
-                and "pid" in args and "window_id" in args and "target" not in args
+                and "pid" in args and "window_id" in args and args.get("target") is None
                 and args.get("scope") in (None, "window")
                 and self._session.supports_input_property(name, "target")):
             args["target"] = {"kind": "window", "pid": args.pop("pid"), "window_id": args.pop("window_id")}
