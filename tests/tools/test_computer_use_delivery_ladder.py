@@ -377,6 +377,9 @@ def test_pixel_typing_refuses_unsupported_or_invalid_coordinates():
     session = _FakeSession({})
     be = _make_backend(session)
     assert be.type_text("body", x=1, y=2).code == "pixel_typing_unsupported"
+    assert session.calls == []
+    session = _FakeSession({}, input_properties={"type_text": {"x", "y"}})
+    be = _make_backend(session)
     for x, y in ((True, 2), (1, None), (-1, 2), (1, 32768)):
         assert not be.type_text("body", x=x, y=y).ok
     assert session.calls == []
@@ -390,7 +393,7 @@ def test_type_dispatch_preserves_pixel_coordinates():
     backend.type_text.assert_called_once_with("body", x=12, y=34, delivery_mode="foreground")
 
 
-@pytest.mark.parametrize("point", [None, [], [None, 2], [1], [1, 2, 3], [True, 2], [1, -1]])
+@pytest.mark.parametrize("point", [None, [], [None, 2], [1], [1, 2, 3], [True, 2], [1, -1], [1, 32768]])
 def test_type_dispatch_refuses_invalid_supplied_coordinate(point):
     from tools.computer_use.tool import _ACTIONS
     from unittest.mock import Mock
@@ -407,3 +410,11 @@ def test_type_dispatch_without_coordinates_preserves_delivery(delivery):
     backend = Mock()
     _ACTIONS["type"].handler(backend, "type", {"text": "body"}, **delivery)
     backend.type_text.assert_called_once_with("body", **delivery)
+
+
+@pytest.mark.parametrize("point", [(0, 0), (32767, 32767)])
+def test_pixel_typing_accepts_coordinate_boundaries(point):
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"type_text": {"x", "y"}})
+    be = _make_backend(session)
+    assert be.type_text("body", x=point[0], y=point[1]).ok
+    assert session.calls == [("type_text", {"pid": 4242, "window_id": 7, "x": point[0], "y": point[1], "text": "body", "session": "test-run"})]
