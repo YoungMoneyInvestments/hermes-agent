@@ -431,6 +431,14 @@ def test_input_uses_explicit_exact_window_target_when_supported():
         assert not ({"pid", "window_id", "scope"} & args.keys())
 
 
+def test_explicit_window_translation_removes_legacy_scope():
+    session = _FakeSession({"isError": False, "data": {}}, input_properties={"click": {"target"}})
+    be = _make_backend(session)
+    assert be._action("click", {"pid": 4242, "window_id": 7, "scope": "window", "x": 100, "y": 200}).ok
+    assert session.last_args["target"] == {"kind": "window", "pid": 4242, "window_id": 7}
+    assert not ({"pid", "window_id", "scope"} & session.last_args.keys())
+
+
 def test_input_preserves_legacy_target_when_selector_is_unsupported():
     session = _FakeSession({"isError": False, "data": {}}, input_properties={"type_text": {"x", "y"}})
     be = _make_backend(session)
