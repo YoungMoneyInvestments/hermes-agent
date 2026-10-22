@@ -4,6 +4,8 @@ import json
 import os
 import subprocess
 import shutil
+import stat
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -145,6 +147,36 @@ class TestProjectFacts:
         assert f"Root: {worktree.resolve()}" in block or "Root:" in block
 
 
+
+    @pytest.mark.platforms("macos")
+    def test_dataless_manifest_is_not_opened_for_workspace_facts(self, tmp_path, monkeypatch):
+        manifest = tmp_path / "package.json"
+        manifest.write_text('{"scripts": {"test": "vitest"}}')
+        original_stat, original_read = Path.stat, Path.read_text
+        metadata = manifest.stat()
+
+        def placeholder_stat(path, *args, **kwargs):
+            if path == manifest:
+                return SimpleNamespace(st_mode=metadata.st_mode, st_size=metadata.st_size,
+                                       st_flags=stat.SF_DATALESS)
+            return original_stat(path, *args, **kwargs)
+
+        def refuse_hydration(path, *args, **kwargs):
+            if path == manifest:
+                pytest.fail("dataless manifest must not be opened")
+            return original_read(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", placeholder_stat)
+        monkeypatch.setattr(Path, "read_text", refuse_hydration)
+        assert cc._read_small(manifest) == ""
+        assert cc.detect_project_facts(tmp_path).verify_commands == []
+
+    def test_local_manifest_read_and_workspace_facts_are_preserved(self, tmp_path):
+        manifest = tmp_path / "package.json"
+        content = '{"scripts": {"test": "vitest"}}'
+        manifest.write_text("\ufeff" + content, encoding="utf-8")
+        assert cc._read_small(manifest) == content
+        assert cc.detect_project_facts(tmp_path).verify_commands == ["npm run test"]
 
     def test_detect_project_facts_structured(self, tmp_path):
         (tmp_path / "package.json").write_text(
