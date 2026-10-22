@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -446,7 +447,10 @@ def _parse_status(porcelain: str) -> tuple[dict[str, str], dict[str, int]]:
 def _read_small(path: Path) -> str:
     """Read a small text file, or ``""`` — never raises, never reads huge files."""
     try:
-        if not path.is_file() or path.stat().st_size > _MAX_FACT_FILE_BYTES:
+        metadata = path.stat()
+        # Reading a cloud placeholder can wait indefinitely for hydration at startup.
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_FACT_FILE_BYTES
+                or getattr(metadata, "st_flags", 0) & getattr(stat, "SF_DATALESS", 0)):
             return ""
         return path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
