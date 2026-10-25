@@ -25,7 +25,10 @@ import sys
 from pathlib import Path
 from typing import Dict, Optional
 
-from agent.secret_sources.base import ErrorKind, FetchResult, SecretSource, coerce_float, source_child_env
+from agent.secret_sources.base import (
+    ErrorKind, FetchResult, SecretSource, coerce_float,
+    get_source_environment, source_child_env,
+)
 
 __all__ = ["FetchResult", "unquote_dotenv_value"]
 
@@ -73,6 +76,18 @@ def _run_helper(command: str, secret_key: str, timeout_seconds: float, max_outpu
     # credential to resolve the secret) — but a multiplex profile only its own.
     env = source_child_env()
     env["HERMES_SECRET_KEY"] = secret_key
+    # Internal helper-child context, never user configuration. Profile flags
+    # have been stripped by main._apply_profile_override before dotenv startup.
+    # Only leading --cli chat after profile stripping is supported; other argv
+    # forms intentionally remain full. Gateway, unknown entry points and
+    # multiplex fetches retain full channel requirements. Always overwrite an
+    # inherited marker so a terminal's child gateway cannot inherit an opt-out.
+    terminal = (get_source_environment() is os.environ and
+                sys.argv[1:3] == ["--cli", "chat"] and
+                not any(arg == "--gateway" or arg.startswith("--gateway=") for arg in sys.argv[3:]) and
+                "_HERMES_GATEWAY" not in os.environ)
+    # Presence is conservative: even empty/0/false gateway markers remain full.
+    env["HERMES_SECRET_CONTEXT"] = "terminal-cli" if terminal else "full"
 
     try:
         proc = subprocess.Popen(  # noqa: S602 — command is the user's own config

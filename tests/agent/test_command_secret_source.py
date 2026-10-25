@@ -46,6 +46,102 @@ from hermes_cli import env_loader  # noqa: E402
 pytestmark = pytest.mark.platforms("posix")  # the command secret provider is POSIX-only
 
 
+@pytest.mark.parametrize('argv,expected', [
+    (['hermes', '--cli', 'chat'], 'terminal-cli'),
+    (['hermes', '--cli', 'chat', '--oneshot', '--query-file', 'question.txt'], 'terminal-cli'),
+    # Raw profile flags are not proof of terminal mode before main strips them.
+    (['hermes', '-p', 'cami', '--cli', 'chat'], 'full'),
+    (['hermes', '--profile', 'cami', '--cli', 'chat'], 'full'),
+    (['hermes', 'gateway', 'run'], 'full'),
+    (['hermes', '--cli', 'gateway', 'run'], 'full'),
+    (['hermes', '--cli', 'chat', '--gateway'], 'full'),
+    (['hermes', '--cli', 'chat', '--gateway=true'], 'full'),
+    (['hermes', '--cli', 'chat', '--gateway=false'], 'full'),
+    (['hermes', 'chat', '-q', '--cli chat'], 'full'),
+    (['hermes'], 'full'),
+    (['pytest'], 'full'),
+])
+def test_helper_context_uses_explicit_runtime_argv_not_inherited_marker(monkeypatch, argv, expected):
+    monkeypatch.setattr(sys, 'argv', argv)
+    monkeypatch.setenv('HERMES_SECRET_CONTEXT', 'terminal-cli')
+    monkeypatch.delenv('_HERMES_GATEWAY', raising=False)
+    output = _run_helper('printf "%s" "$HERMES_SECRET_CONTEXT"', '', 1.0, 1024)
+    assert output == expected
+    # No process-global context is exported, only the helper-child environment.
+    assert os.environ['HERMES_SECRET_CONTEXT'] == 'terminal-cli'
+
+
+@pytest.mark.parametrize('gateway_value', ['1', '', '0', 'false'])
+def test_gateway_marker_and_multiplex_deny_terminal_context(monkeypatch, gateway_value):
+    monkeypatch.setattr(sys, 'argv', ['hermes', '--cli', 'chat'])
+    monkeypatch.setenv('_HERMES_GATEWAY', gateway_value)
+    assert _run_helper('printf "%s" "$HERMES_SECRET_CONTEXT"', '', 1.0, 1024) == 'full'
+    monkeypatch.delenv('_HERMES_GATEWAY')
+    token = set_source_environment({'HERMES_SECRET_CONTEXT': 'terminal-cli'})
+    try:
+        assert _run_helper('printf "%s" "$HERMES_SECRET_CONTEXT"', '', 1.0, 1024) == 'full'
+    finally:
+        reset_source_environment(token)
+
+
+def test_real_registry_propagates_cli_context_but_scoped_fetches_remain_full(tmp_path, monkeypatch):
+    from agent.secret_sources.registry import apply_all
+    monkeypatch.setattr(sys, 'argv', ['hermes', '--cli', 'chat', '--oneshot'])
+    monkeypatch.delenv('_HERMES_GATEWAY', raising=False)
+    helper = _write_helper(tmp_path, 'printf "CONTEXT_TEST_RESULT=%s\\n" "$HERMES_SECRET_CONTEXT"')
+    config = {'command': {'enabled': True, 'command': str(helper), 'override_existing': True}}
+    for name in ('a', 'b', 'a'):
+        home = tmp_path / name
+        home.mkdir(exist_ok=True)
+        monkeypatch.setenv('HERMES_HOME', str(home))
+        apply_all(config, home)
+        assert os.environ['CONTEXT_TEST_RESULT'] == 'terminal-cli'
+        scoped = {'HERMES_HOME': str(home), 'HERMES_SECRET_CONTEXT': 'terminal-cli'}
+        apply_all(config, home, environ=scoped)
+        assert scoped['CONTEXT_TEST_RESULT'] == 'full'
+        assert os.environ['CONTEXT_TEST_RESULT'] == 'terminal-cli'
+
+
+def test_actual_profile_startup_context_a_b_a(tmp_path):
+    import json
+    import subprocess
+    root = tmp_path / 'hermes'
+    root.mkdir()
+    record = tmp_path / 'contexts.jsonl'
+    helper = tmp_path / 'observe_context.py'
+    helper.write_text(
+        'import json,os\nfrom pathlib import Path\n'
+        'with Path(' + repr(str(record)) + ').open("a") as stream: '
+        'stream.write(json.dumps({"context":os.environ.get("HERMES_SECRET_CONTEXT"),'
+        '"home":os.environ.get("HERMES_HOME")})+"\\n")\n'
+        'print("CONTEXT_TEST_RESULT=synthetic-placeholder")\n', encoding='utf-8')
+    for name in ('a', 'b'):
+        home = root / 'profiles' / name
+        home.mkdir(parents=True)
+        (home / 'config.yaml').write_text(
+            'secrets:\n  command:\n    enabled: true\n    command: ' +
+            json.dumps(sys.executable + ' ' + str(helper)) + '\n', encoding='utf-8')
+    # These are real CLI help startups, with only synthetic profile homes and
+    # no model request. Sitecustomize refuses any accidental network operation.
+    bootstrap = tmp_path / 'bootstrap'
+    bootstrap.mkdir()
+    (bootstrap / 'sitecustomize.py').write_text(
+        'import socket\ndef deny(*args,**kwargs): raise RuntimeError("network forbidden in startup test")\n'
+        'socket.socket.connect=deny\nsocket.create_connection=deny\n', encoding='utf-8')
+    env = {'PATH': os.environ.get('PATH', ''), 'HOME': str(tmp_path / 'user'),
+           'HERMES_HOME': str(root), 'PYTHONUTF8': '1',
+           'PYTHONPATH': os.pathsep.join([str(bootstrap), str(ROOT), *[p for p in sys.path if p]]),
+           'HERMES_SECRET_CONTEXT': 'full'}
+    for flags in (['-p', 'a'], ['--profile', 'b'], ['--profile=a']):
+        result = subprocess.run([sys.executable, '-B', '-m', 'hermes_cli.main',
+                                 *flags, '--cli', 'chat', '--help'], env=env,
+                                cwd=ROOT, capture_output=True, timeout=45)
+        assert result.returncode == 0, result.stderr.decode('utf-8', errors='replace')[-1200:]
+    observed = [json.loads(line) for line in record.read_text(encoding='utf-8').splitlines()]
+    assert [Path(row['home']).name for row in observed] == ['a', 'b', 'a']
+    assert all(row['context'] == 'terminal-cli' for row in observed)
+
+
 def _write_helper(tmp_path: Path, body: str, name: str = "helper.sh") -> Path:
     """Write a real executable helper script and return its path."""
     script = tmp_path / name
@@ -76,12 +172,12 @@ def _clean_env(monkeypatch):
     leftover test keys in os.environ."""
     env_loader._SECRET_SOURCES.clear()
     env_loader.reset_secret_source_cache()
-    for key in ("CMDTEST_API_KEY", "CMDTEST_TOKEN", "CMDTEST_OTHER_KEY"):
+    for key in ("CMDTEST_API_KEY", "CMDTEST_TOKEN", "CMDTEST_OTHER_KEY", "CONTEXT_TEST_RESULT"):
         monkeypatch.delenv(key, raising=False)
     yield
     env_loader._SECRET_SOURCES.clear()
     env_loader.reset_secret_source_cache()
-    for key in ("CMDTEST_API_KEY", "CMDTEST_TOKEN", "CMDTEST_OTHER_KEY"):
+    for key in ("CMDTEST_API_KEY", "CMDTEST_TOKEN", "CMDTEST_OTHER_KEY", "CONTEXT_TEST_RESULT"):
         os.environ.pop(key, None)
 
 
