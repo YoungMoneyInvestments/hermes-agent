@@ -78,7 +78,8 @@ def _run_helper(command: str, secret_key: str, timeout_seconds: float, max_outpu
     env["HERMES_SECRET_KEY"] = secret_key
     # Internal helper-child context, never user configuration. Profile flags
     # have been stripped by main._apply_profile_override before dotenv startup.
-    # Recognize only explicit terminal chat; gateway, unknown entry points and
+    # Only leading --cli chat after profile stripping is supported; other argv
+    # forms intentionally remain full. Gateway, unknown entry points and
     # multiplex fetches retain full channel requirements. Always overwrite an
     # inherited marker so a terminal's child gateway cannot inherit an opt-out.
     terminal = (get_source_environment() is os.environ and

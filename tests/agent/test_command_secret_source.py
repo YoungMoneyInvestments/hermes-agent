@@ -172,12 +172,12 @@ def _clean_env(monkeypatch):
     leftover test keys in os.environ."""
     env_loader._SECRET_SOURCES.clear()
     env_loader.reset_secret_source_cache()
-    for key in ("CMDTEST_API_KEY", "CMDTEST_TOKEN", "CMDTEST_OTHER_KEY"):
+    for key in ("CMDTEST_API_KEY", "CMDTEST_TOKEN", "CMDTEST_OTHER_KEY", "CONTEXT_TEST_RESULT"):
         monkeypatch.delenv(key, raising=False)
     yield
     env_loader._SECRET_SOURCES.clear()
     env_loader.reset_secret_source_cache()
-    for key in ("CMDTEST_API_KEY", "CMDTEST_TOKEN", "CMDTEST_OTHER_KEY"):
+    for key in ("CMDTEST_API_KEY", "CMDTEST_TOKEN", "CMDTEST_OTHER_KEY", "CONTEXT_TEST_RESULT"):
         os.environ.pop(key, None)
 
 
