@@ -46,6 +46,81 @@ from hermes_cli import env_loader  # noqa: E402
 pytestmark = pytest.mark.platforms("posix")  # the command secret provider is POSIX-only
 
 
+@pytest.mark.parametrize('argv,expected', [
+    (['hermes', '--cli', 'chat'], 'terminal-cli'),
+    (['hermes', '--cli', 'chat', '--oneshot', '--query-file', 'question.txt'], 'terminal-cli'),
+    # Raw profile flags are not proof of terminal mode before main strips them.
+    (['hermes', '-p', 'cami', '--cli', 'chat'], 'full'),
+    (['hermes', '--profile', 'cami', '--cli', 'chat'], 'full'),
+    (['hermes', 'gateway', 'run'], 'full'),
+    (['hermes', '--cli', 'gateway', 'run'], 'full'),
+    (['hermes', '--cli', 'chat', '--gateway'], 'full'),
+    (['hermes', 'chat', '-q', '--cli chat'], 'full'),
+    (['hermes'], 'full'),
+    (['pytest'], 'full'),
+])
+def test_helper_context_uses_explicit_runtime_argv_not_inherited_marker(monkeypatch, argv, expected):
+    monkeypatch.setattr(sys, 'argv', argv)
+    monkeypatch.setenv('HERMES_SECRET_CONTEXT', 'terminal-cli')
+    monkeypatch.delenv('_HERMES_GATEWAY', raising=False)
+    output = _run_helper('printf "%s" "$HERMES_SECRET_CONTEXT"', '', 1.0, 1024)
+    assert output == expected
+    # No process-global context is exported, only the helper-child environment.
+    assert os.environ['HERMES_SECRET_CONTEXT'] == 'terminal-cli'
+
+
+def test_gateway_marker_and_multiplex_deny_terminal_context(monkeypatch):
+    monkeypatch.setattr(sys, 'argv', ['hermes', '--cli', 'chat'])
+    monkeypatch.setenv('_HERMES_GATEWAY', '1')
+    assert _run_helper('printf "%s" "$HERMES_SECRET_CONTEXT"', '', 1.0, 1024) == 'full'
+    monkeypatch.delenv('_HERMES_GATEWAY')
+    token = set_source_environment({'HERMES_SECRET_CONTEXT': 'terminal-cli'})
+    try:
+        assert _run_helper('printf "%s" "$HERMES_SECRET_CONTEXT"', '', 1.0, 1024) == 'full'
+    finally:
+        reset_source_environment(token)
+
+
+def test_real_registry_propagates_cli_context_but_scoped_fetches_remain_full(tmp_path, monkeypatch):
+    from agent.secret_sources.registry import apply_all
+    monkeypatch.setattr(sys, 'argv', ['hermes', '--cli', 'chat', '--oneshot'])
+    monkeypatch.delenv('_HERMES_GATEWAY', raising=False)
+    helper = _write_helper(tmp_path, 'printf "CONTEXT_TEST_RESULT=%s\\n" "$HERMES_SECRET_CONTEXT"')
+    config = {'command': {'enabled': True, 'command': str(helper), 'override_existing': True}}
+    for name in ('a', 'b', 'a'):
+        home = tmp_path / name
+        home.mkdir(exist_ok=True)
+        monkeypatch.setenv('HERMES_HOME', str(home))
+        apply_all(config, home)
+        assert os.environ['CONTEXT_TEST_RESULT'] == 'terminal-cli'
+        scoped = {'HERMES_HOME': str(home), 'HERMES_SECRET_CONTEXT': 'terminal-cli'}
+        apply_all(config, home, environ=scoped)
+        assert scoped['CONTEXT_TEST_RESULT'] == 'full'
+        assert os.environ['CONTEXT_TEST_RESULT'] == 'terminal-cli'
+
+
+@pytest.mark.parametrize('flags', [['-p', 'cami'], ['--profile', 'cami'], ['--profile=cami']])
+def test_real_early_profile_strip_precedes_context_detection(monkeypatch, tmp_path, flags):
+    # Execute the actual stdlib-only early functions without importing main,
+    # which would read live configuration and run credential sources at import.
+    import ast
+    import re
+    from hermes_cli import profiles
+    tree = ast.parse((ROOT / 'hermes_cli/main.py').read_text(encoding='utf-8'))
+    names = {'_apply_profile_override', '_scan_profile_flag', '_inside_mcp_add_args'}
+    nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+    constant = next(node for node in tree.body if isinstance(node, ast.Assign) and
+                    any(isinstance(target, ast.Name) and target.id == '_PROFILE_NAME_RE' for target in node.targets))
+    namespace = {'sys': sys, 'os': os, 'Path': Path, 're': re}
+    exec(compile(ast.Module(body=[constant, *nodes], type_ignores=[]), '<real-early-profile>', 'exec'), namespace)
+    monkeypatch.setattr(profiles, 'resolve_profile_env', lambda name: str(tmp_path / 'profiles' / name))
+    monkeypatch.setattr(sys, 'argv', ['hermes', *flags, '--cli', 'chat', '--oneshot'])
+    monkeypatch.delenv('_HERMES_GATEWAY', raising=False)
+    namespace['_apply_profile_override']()
+    assert sys.argv[1:3] == ['--cli', 'chat']
+    assert _run_helper('printf "%s" "$HERMES_SECRET_CONTEXT"', '', 1.0, 1024) == 'terminal-cli'
+
+
 def _write_helper(tmp_path: Path, body: str, name: str = "helper.sh") -> Path:
     """Write a real executable helper script and return its path."""
     script = tmp_path / name
