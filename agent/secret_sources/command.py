@@ -83,8 +83,9 @@ def _run_helper(command: str, secret_key: str, timeout_seconds: float, max_outpu
     # inherited marker so a terminal's child gateway cannot inherit an opt-out.
     terminal = (get_source_environment() is os.environ and
                 sys.argv[1:3] == ["--cli", "chat"] and
-                "--gateway" not in sys.argv[3:] and
-                not os.environ.get("_HERMES_GATEWAY"))
+                not any(arg == "--gateway" or arg.startswith("--gateway=") for arg in sys.argv[3:]) and
+                "_HERMES_GATEWAY" not in os.environ)
+    # Presence is conservative: even empty/0/false gateway markers remain full.
     env["HERMES_SECRET_CONTEXT"] = "terminal-cli" if terminal else "full"
 
     try:
